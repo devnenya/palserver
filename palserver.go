@@ -1,13 +1,12 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -95,6 +94,27 @@ func main() {
 	}
 }
 
+func (u *User) GetServerIDBytes() []byte {
+	// Check the ServerID value
+	fmt.Printf("ServerID: %d\n", u.ServerID)
+
+	// Create a byte slice to hold the 4 bytes
+	serverIDBytes := make([]byte, 4)
+
+	// Convert the ServerID to a 4-byte slice in Big Endian format
+	binary.BigEndian.PutUint32(serverIDBytes, u.ServerID)
+
+	// Print the bytes to verify the conversion
+	fmt.Printf("ServerID Bytes: %v\n", serverIDBytes)
+
+	// Return the bytes as a string, each byte represented by chr(<byte>)
+	result := ""
+	for _, b := range serverIDBytes {
+		result += fmt.Sprintf("chr(%d) ", b)
+	}
+	return serverIDBytes
+}
+
 func ipToBytes(ip net.IP) ([]byte, error) {
 	if ip = ip.To4(); ip == nil {
 		return nil, fmt.Errorf("invalid IPv4 address")
@@ -155,12 +175,9 @@ func handleConnection(conn net.Conn) {
 
 	ipString := string(ipBytes)
 
-	// Assign a unique ServerID
-	serverID := assignServerID()
-
 	// Create a new user and add it to the users array
 	user := User{
-		ServerID:   serverID,
+		ServerID:   assignServerID(),
 		Logged:     false,
 		Connection: conn,
 		IP:         ipString,
@@ -172,7 +189,7 @@ func handleConnection(conn net.Conn) {
 
 	log.Printf("New user connected: ServerID %08x\n", user.ServerID)
 
-	sendOut(&user, ipString)
+	sendOut(&user, ipBytes)
 
 	// Buffer to hold incoming data
 	buffer := make([]byte, 1024)
@@ -235,11 +252,28 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 	if !user.Logged {
 		switch sByteIn {
 		case 129:
+
+			part1 := []byte{0, 0, 0, 0, 3, 0, 1, 0, 3}
+			part2 := []byte{0, 0, 0, 0, 1, 32, 0, 0, 0, 7, 0, 0, 0, 0}
+			part3 := []byte{0, 0, 0, 4, 1, 33, 0, 0, 0, 1, 74, 208, 229, 29}
+			part4 := []byte{0, 0, 10, 112, 1, 71, 0, 0, 0, 0, 74, 208, 229, 29}
+			part5 := []byte{0, 3, 5, 3, 251, 0}
+			part6 := []byte{0, 3, 232, 0, 7, 79, 112, 101, 110, 80, 65, 76}
+			part7 := []byte{0, 3, 233, 0, 7, 104, 116, 116, 112, 58, 47, 47}
+			part8 := []byte{0, 0, 0, 0}
+
+			packet := append(part1, part2...)
+			packet = append(packet, part3...)
+			packet = append(packet, part4...)
+			packet = append(packet, part5...)
+			packet = append(packet, part6...)
+			packet = append(packet, part7...)
+			packet = append(packet, part8...)
+
 			// We just got the version packet
-			sendOut(user, string(VpString("0 0 0"))) // Convert byte slice to string
+			sendOut(user, packet)
 			break
 		case 130:
-			//SERVER: 131 0 0 0 44 0 12 0 0 0 0 0 120 158 0 14 112 114 105 110 99 101 115 115 64 98 117 100 100 121 1 2 0 0 0 1 0 0 0 3 0 0 0 2 0 0 0 0 0
 			if len(packetData) < 5 {
 				log.Println("Error: Packet too short to contain valid data.")
 				return
@@ -249,8 +283,6 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 			fixedPart := packetData[:5]
 			fmt.Println("Fixed part:", fixedPart) // For debugging
 
-			// Extract the username (after the fixed part)
-			// The length of the username is encoded using TBL format
 			usernameLength := UTBL(packetData[5:7]) // Extract the username length from the next 2 bytes
 			if len(packetData) < 7+usernameLength {
 				log.Println("Error: Packet too short to contain username.")
@@ -269,37 +301,48 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 			user.Username = username
 			user.Password = password
 
-			part1 := VpString("0 12 0 0 0")
-			part2 := string(user.ServerID)
+			part1 := []byte{0, 12, 0, 0, 0}
+			part2 := user.GetServerIDBytes()
 			part3 := TBL(user.Username)
-			part4 := VpString("1 2 0 0 0 1 0 0 0 3 0 0 0 2 0 0 0 0 0")
+			part4 := []byte{1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0}
 
 			packet := append(part1, part2...)
 			packet = append(packet, part3...)
 			packet = append(packet, part4...)
-			sendOut(user, string(packet))
+			sendOut(user, packet)
 			break
 		case 132:
-			//0 15 0 0 0 0 0 113 68 0 0 0 1 0 17 118 112 98 117 100 100 121 58 47 47 104 97 108 115 111 102 116 0 1 0 0 0
-			//0 15 0 0 1 0 0 113 68 0 3 0 0 0 38 8 128 0 17 118 112 98 117 100 100 121 58 47 47 104 97 108 115 111 102 116 1 1 0 0 0 40 0 0 0 39 0 0 0 0 0 0 0 0 0 50 0 0 0 0 0 0 0 0 0
-			fmt.Println("Processing 131")
 			urlLength := UTBL(packetData[13:15])
 			urlBytes := packetData[15 : 15+urlLength]
 
 			fmt.Println("URL:", string(urlBytes)) // For debugging
 
-			part1 := VpString("0 15 0 0 1")
-			part2 := string(user.ServerID)
-			part3 := VpString("0 3 0 0 0 38 8 128")
-			part4 := string(urlBytes)
-			part5 := VpString("1 1 0 0 0 40 0 0 0 39 0 0 0 0 0 0 0 0 0 50 0 0 0 0 0 0 0 0 0")
+			part1 := []byte{0, 15, 0, 0, 1}
+			part2 := user.GetServerIDBytes()
+			part3 := []byte{0, 3, 0, 0, 0, 38, 8, 128}
+			part4 := TBL(string(urlBytes))
+			part5 := []byte{1, 1, 0, 0, 0, 40, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
-			packet := append(part1, part2...)
+			// Create the packet by appending each part
+			packet := append(part1, part2...) // Directly append the bytes from part2 (ServerID bytes)
 			packet = append(packet, part3...)
-			packet = append(packet, part4...)
+			packet = append(packet, part4...) // part4 is already a byte slice
 			packet = append(packet, part5...)
 
-			sendOut(user, string(packet))
+			// Debug the final packet to ensure ServerID is included
+			fmt.Printf("Final Packet: %v\n", packet)
+
+			// Send the packet (directly passing the byte slice)
+			sendOut(user, packet)
+
+			newpart1 := []byte{0, 29, 0}
+			newpart2 := user.GetServerIDBytes()
+			newpart3 := []byte{0, 0, 10, 114, 0, 104, 0, 0, 0, 0, 0, 0, 0, 0, 10, 112}
+
+			packet2 := append(newpart1, newpart2...)
+			packet2 = append(packet2, newpart3...)
+
+			sendOut(user, packet2)
 			user.Logged = true
 			break
 
@@ -313,14 +356,14 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 }
 
 // Function to send data to a user (equivalent to SendOut in JavaScript)
-func sendOut(user *User, data string) {
+func sendOut(user *User, data []byte) {
 	if user.Connection == nil {
 		log.Println("User is not connected, unable to send data.")
 		return
 	}
 
 	// Convert the data into the proper format (FBL equivalent)
-	dataBuffer := FBL(data) // FBL returns a buffer for the data
+	dataBuffer := FBL(data) // FBL should accept a byte slice, not a string
 
 	// Combine the user-specific sByte with the data
 	sByteBuffer := []byte{user.SByte}
@@ -333,7 +376,6 @@ func sendOut(user *User, data string) {
 	}
 
 	// Increment and reset sByte logic
-
 	if user.SByte == 255 {
 		user.SByte = 129
 	} else {
@@ -377,7 +419,6 @@ func UFBL(buffer []byte) int {
 	return int(buffer[0])<<(3*8) | int(buffer[1])<<(2*8) | int(buffer[2])<<8 | int(buffer[3])
 }
 
-// Convert a 2-byte buffer to an integer (similar to JS's UTBL)
 func UTBL(buffer []byte) int {
 	if len(buffer) != 2 {
 		fmt.Println("UTBL expects a 2-byte buffer.")
@@ -386,21 +427,11 @@ func UTBL(buffer []byte) int {
 	return int(buffer[0])<<8 | int(buffer[1])
 }
 
-// Convert a string to a 4-byte length + string buffer (similar to JS's FBL)
-func FBL(theString string) []byte {
-	lengthBuffer := fourByteLength(len(theString))
-	stringBuffer := []byte(theString) // ASCII encoding by default in Go
-	return append(lengthBuffer, stringBuffer...)
+func FBL(theBytes []byte) []byte {
+	lengthBuffer := fourByteLength(len(theBytes)) // Get length of byte array
+	return append(lengthBuffer, theBytes...)      // Append the byte array to the length buffer
 }
 
-// Convert a string to a 2-byte length + string buffer (similar to JS's TBL)
-func TBL(theString string) []byte {
-	lengthBuffer := twoByteLength(len(theString))
-	stringBuffer := []byte(theString) // ASCII encoding by default in Go
-	return append(lengthBuffer, stringBuffer...)
-}
-
-// Convert a uint packet size to a 4-byte array (similar to JS's fourByteLength)
 func fourByteLength(uintPacketSize int) []byte {
 	return []byte{
 		byte(uintPacketSize >> 24), // highest byte
@@ -410,7 +441,23 @@ func fourByteLength(uintPacketSize int) []byte {
 	}
 }
 
-// Convert a uint packet size to a 2-byte array (similar to JS's twoByteLength)
+func TBL(data string) []byte {
+	// Get the length of the username
+	packetLength := len(data)
+	// Get the length buffer (2-byte)
+	lengthBuffer := twoByteLength(packetLength)
+
+	// Convert the username string to a byte slice (ASCII encoding by default)
+	stringBuffer := []byte(data)
+
+	// Debugging: print the lengthBuffer and stringBuffer
+	fmt.Printf("Length Buffer: %v\n", lengthBuffer)
+	fmt.Printf("String Buffer: %v\n", stringBuffer)
+
+	// Return the length buffer followed by the string buffer
+	return append(lengthBuffer, stringBuffer...)
+}
+
 func twoByteLength(uintPacketSize int) []byte {
 	if uintPacketSize > 65535 {
 		panic("Packet length cannot exceed 65,535 bytes.")
@@ -419,21 +466,6 @@ func twoByteLength(uintPacketSize int) []byte {
 		byte(uintPacketSize >> 8), // high byte
 		byte(uintPacketSize),      // low byte
 	}
-}
-
-// Split a space-separated string into an array of integers and convert it to a byte slice (similar to JS's VpString)
-func VpString(theString string) []byte {
-	parts := strings.Split(theString, " ")
-	byteArray := make([]byte, len(parts))
-	for i, part := range parts {
-		num, err := strconv.Atoi(part)
-		if err != nil {
-			fmt.Println("Error converting string to integer:", err)
-			return nil
-		}
-		byteArray[i] = byte(num)
-	}
-	return byteArray
 }
 
 // Convert a byte array to a space-separated ASCII string (similar to JS's AsciiString)
