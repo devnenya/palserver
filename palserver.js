@@ -82,7 +82,7 @@ function findUserByName(username) {
 }
 
 function findUserByID(ID) {
-    return users.findIndex(u => u.getServerIDBytes() === ID);
+    return users.findIndex(u => AsciiString(u.getServerIDBytes()) === ID);
 }
 
 const ipToBytes = (ip) => {
@@ -268,11 +268,11 @@ function processPacket (sByte, clientPacket, user) {
     } else {
         switch(clientPacket[1]) {
         case 5: // Handle DMs
-            let messagesize = UTBL(packetData.slice(7, 9)); // Extract message size
-            let messagetext = packetData.slice(9, 9 + messagesize); // Extract message text
+            let messagesize = UTBL(clientPacket.slice(7, 9)); // Extract message size
+            let messagetext = clientPacket.slice(9, 9 + messagesize); // Extract message text
 
             let attachmentsizeStart = 9 + messagesize;
-            let attachmentsize = UFBL(packetData.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
+            let attachmentsize = UFBL(clientPacket.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
         
             let hasGesture = attachmentsize !== 0;
         
@@ -281,57 +281,53 @@ function processPacket (sByte, clientPacket, user) {
         
             if (hasGesture) {
                 let gesturesizeStart = attachmentsizeStart + 5; // Gesture TBL starts after the flag
-                let gesturesize = UTBL(packetData.slice(gesturesizeStart, gesturesizeStart + 2));
-                gesturetext = packetData.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
+                let gesturesize = UTBL(clientPacket.slice(gesturesizeStart, gesturesizeStart + 2));
+                gesturetext = clientPacket.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
                 sIDStart = gesturesizeStart + 2 + gesturesize; // sID starts after gesture data
             } else {
                 // No gesture
                 sIDStart = attachmentsizeStart + 4;
             }
         
-            let tID = packetData.slice(sIDStart, sIDStart + 4); // Extract 4-byte sID
+            tID = AsciiString(clientPacket.slice(clientPacket.length - 4));
+            console.log(`User DM: ${tID} ${messagetext}`);
         
-            const part1 = VpString("0 5 0");  // This might be a fixed header or control message
-            const part2 = Buffer.from(sID, 'ascii'); // Ensure `sID` is a valid string/ID
-            const part3 = TBL(sanitizedMessage); // This is presumably a transformation function for the byte array
-            const part4 = VpString("0 0 0 0");  // Another control message or padding
-            const part5 = VpString(user.tid);   // User's unique identifier in the friends list
-
             findBuddy = findUserByID(tID);
             if (findBuddy >= 0) { 
                 response = Buffer.concat([
                     Buffer.from([0, 5, 0]),       // Fixed header
-                    tID,
+                    users[findBuddy].getServerIDBytes(),
                     TBL(messagetext),
-                    clientPacket.splice(attachmentsizeStart, sIDStart),
+                    clientPacket.slice(attachmentsizeStart, sIDStart),
                     userID,
+                    Buffer.from([1, 0]),
                     TBL(user.username),
                     Buffer.from([2, 255, 255, 255, 255, 0, 0])]);
-                sendOut(findBuddy, response); 
+                sendOut(users[findBuddy], response); 
                 }
             break;
         
         case 15:
             // Handle room data
             //0 15 0 0 1 0 0 68 80 0 21 1 1 0 0 70 222
-            switch (packetData[10]) {
+            switch (clientPacket[10]) {
                 case 21:
-                    friendTid = AsciiString(packetData.slice(13, 17));
-                    friend = findUserByID(friendTid);
+                    tID = AsciiString(clientPacket.slice(13, 17));
+                    findBuddy = findUserByID(tID);
+                    if (findBuddy >= 0) {
                     response = Buffer.concat([
                         Buffer.from([0, 15, 0, 0, 1]),       // Fixed header
                         userID,                        // User ID (Buffer)
                         Buffer.from([0, 21, 1, 1]),
-                        friendTid,
-                        FBL(friend.avatarData)]);
-                    sendOut(user, response); 
+                        tID,
+                        FBL(users[findBuddy].avatarData)]);
+                    sendOut(user, response);
+                    }
                     break;
 
                 case 22:
-                    avdata = packetData.slice(17);
-                    friendTid = AsciiString(packetData.slice(5, 9));
-                    friend = findUserByID(friendTid);
-                    friend.avatarData = avdata;
+                    avdata = clientPacket.slice(17);
+                    user.avatarData = avdata;
                     break;
             }
 
@@ -384,18 +380,19 @@ function processPacket (sByte, clientPacket, user) {
                             response = Buffer.concat([
                                 Buffer.from([0, 29, 0]),       // Fixed header
                                 userID,                        // User ID (Buffer)
-                                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0, 0, 12, 1]),
-                                TBL(tempBuddyName),
-                                buddyID,
+                                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
+                                TBL(Buffer.from([1]) + TBL(tempBuddyName) + buddyID),
                                 Buffer.from([0, 0, 10, 112])]);
                             sendOut(user, response); 
                         }
                     }
                     break;
                 
-
-                    break;
-
+                case 86:
+                        userstatus = clientPacket[19];
+                        broadcast_status(user, userstatus);
+                        break;
+                
                 default:
                     console.log(`Unknown type: ${clientPacket[12]}`);
                     break;
@@ -507,8 +504,8 @@ function broadcast_status(buddy, status) {
             response = Buffer.concat([
                 Buffer.from([0, 29, 0]),       // Fixed header
                 userID,                        // User ID (Buffer)
-                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0, 0, 12, status]),
-                TBL(tempBuddyName),
+                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
+                TBL(status + TBL(tempBuddyName)),
                 buddyID,
                 Buffer.from([0, 0, 10, 112])]);
             sendOut(user, response); 
