@@ -22,12 +22,48 @@ class User {
         this.buffer = Buffer.alloc(0);
     }
 
+        // Add a buddy to the buddy list
+        addBuddy(buddy) {
+            if (!this.buddyList.includes(buddy)) {
+                this.buddyList.push(buddy);
+                console.log(`Buddy added: ${buddy}`);
+            } else {
+                console.log(`Buddy ${buddy} is already in the list.`);
+            }
+        }
+    
+        // Remove a buddy from the buddy list
+        removeBuddy(buddy) {
+            const index = this.buddyList.indexOf(buddy);
+            if (index !== -1) {
+                this.buddyList.splice(index, 1);
+                console.log(`Buddy removed: ${buddy}`);
+            } else {
+                console.log(`Buddy ${buddy} not found in the list.`);
+            }
+        }
+
     getServerIDBytes() {
         const buffer = Buffer.alloc(4);
         buffer.writeUInt32BE(this.serverID);
         return buffer;
     }
 }
+
+function findUsersWithBuddy(buddyName) {
+    const usersWithBuddy = [];
+
+    // Loop through all users in the users array
+    users.forEach(user => {
+        // Check if the buddyName is in the user's buddyList
+        if (user.buddyList.includes(buddyName)) {
+            usersWithBuddy.push(user);
+        }
+    });
+
+    return usersWithBuddy;
+}
+
 
 const assignServerID = () => nextID++;
 
@@ -41,8 +77,12 @@ const removeUser = (user) => {
     }
 };
 
-function findUser(username) {
+function findUserByName(username) {
     return users.findIndex(u => u.username.toLowerCase() === username.toString().toLowerCase());
+}
+
+function findUserByID(ID) {
+    return users.findIndex(u => u.getServerIDBytes() === ID);
 }
 
 const ipToBytes = (ip) => {
@@ -90,6 +130,7 @@ const handleConnection = (socket) => {
 
     socket.on('close', () => {
         console.log(`User ${user.serverID.toString(16).padStart(8, '0')} disconnected`);
+        broadcast_status(user, 0);
         removeUser(user);
     });
 
@@ -221,16 +262,86 @@ function processPacket (sByte, clientPacket, user) {
                 sendOut(user, response);
                 
                 user.logged = true;
+                broadcast_status(user, 1);
                 break;                
         }
     } else {
         switch(clientPacket[1]) {
+        case 5: // Handle DMs
+            let messagesize = UTBL(packetData.slice(7, 9)); // Extract message size
+            let messagetext = packetData.slice(9, 9 + messagesize); // Extract message text
+
+            let attachmentsizeStart = 9 + messagesize;
+            let attachmentsize = UFBL(packetData.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
+        
+            let hasGesture = attachmentsize !== 0;
+        
+            let gesturetext = "";
+            let sIDStart;
+        
+            if (hasGesture) {
+                let gesturesizeStart = attachmentsizeStart + 5; // Gesture TBL starts after the flag
+                let gesturesize = UTBL(packetData.slice(gesturesizeStart, gesturesizeStart + 2));
+                gesturetext = packetData.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
+                sIDStart = gesturesizeStart + 2 + gesturesize; // sID starts after gesture data
+            } else {
+                // No gesture
+                sIDStart = attachmentsizeStart + 4;
+            }
+        
+            let tID = packetData.slice(sIDStart, sIDStart + 4); // Extract 4-byte sID
+        
+            const part1 = VpString("0 5 0");  // This might be a fixed header or control message
+            const part2 = Buffer.from(sID, 'ascii'); // Ensure `sID` is a valid string/ID
+            const part3 = TBL(sanitizedMessage); // This is presumably a transformation function for the byte array
+            const part4 = VpString("0 0 0 0");  // Another control message or padding
+            const part5 = VpString(user.tid);   // User's unique identifier in the friends list
+
+            findBuddy = findUserByID(tID);
+            if (findBuddy >= 0) { 
+                response = Buffer.concat([
+                    Buffer.from([0, 5, 0]),       // Fixed header
+                    tID,
+                    TBL(messagetext),
+                    clientPacket.splice(attachmentsizeStart, sIDStart),
+                    userID,
+                    TBL(user.username),
+                    Buffer.from([2, 255, 255, 255, 255, 0, 0])]);
+                sendOut(findBuddy, response); 
+                }
+            break;
+        
+        case 15:
+            // Handle room data
+            //0 15 0 0 1 0 0 68 80 0 21 1 1 0 0 70 222
+            switch (packetData[10]) {
+                case 21:
+                    friendTid = AsciiString(packetData.slice(13, 17));
+                    friend = findUserByID(friendTid);
+                    response = Buffer.concat([
+                        Buffer.from([0, 15, 0, 0, 1]),       // Fixed header
+                        userID,                        // User ID (Buffer)
+                        Buffer.from([0, 21, 1, 1]),
+                        friendTid,
+                        FBL(friend.avatarData)]);
+                    sendOut(user, response); 
+                    break;
+
+                case 22:
+                    avdata = packetData.slice(17);
+                    friendTid = AsciiString(packetData.slice(5, 9));
+                    friend = findUserByID(friendTid);
+                    friend.avatarData = avdata;
+                    break;
+            }
+
+            break;
         case 28: //PAL Functions
             switch (clientPacket[12]) {
                 case 65: //Add Buddy
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
                     console.log(`User Added: ${buddyNameText.length} ${buddyNameText}`);
-                    findBuddy = findUser(buddyNameText);
+                    findBuddy = findUserByName(buddyNameText);
                     if (findBuddy >= 0) { 
                         buddyID = users[findBuddy].getServerIDBytes();
                         console.log(`User Online: ${AsciiString(buddyID)} ${buddyNameText}`);
@@ -265,7 +376,7 @@ function processPacket (sByte, clientPacket, user) {
                 
                         console.log(`Buddylist: ADD ${tempBuddyName}`);
 
-                        findBuddy = findUser(tempBuddyName);
+                        findBuddy = findUserByName(tempBuddyName);
                         if (findBuddy >= 0) { 
                             buddyID = users[findBuddy].getServerIDBytes();
                             console.log(`Sending User Online for ${AsciiString(buddyID)} ${tempBuddyName} to ${AsciiString(userID)} ${user.username}`);
@@ -381,6 +492,27 @@ function AsciiString(byteArray) {
 
     // Convert each byte in the array to its ASCII value
     return Array.from(byteArray).join(' ');
+}
+
+//Protocol Functions
+function broadcast_status(buddy, status) {
+    const usersWithBuddy = findUsersWithBuddy(buddy.username);
+
+    // Loop through the users with the buddy and send them a message
+    usersWithBuddy.forEach(tempuser => {
+        userID = tempuser.getServerIDBytes();
+        buddyID = buddy.getServerIDBytes();
+            //0 29 0 0 0 109 13 0 0 10 114 48 111 0 0 0 0 0 21 1 0 14 112 114 105 110 99 101 115 115 64 98 117 100 100 121 0 0 109 13 0 0 10 112
+            //0 29 0 0 0 109 13 0 0 10 114 48 111 0 0 0 0 0 21 0 0 14 112 114 105 110 99 101 115 115 64 98 117 100 100 121 0 0 109 13 0 0 10 112 
+            response = Buffer.concat([
+                Buffer.from([0, 29, 0]),       // Fixed header
+                userID,                        // User ID (Buffer)
+                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0, 0, 12, status]),
+                TBL(tempBuddyName),
+                buddyID,
+                Buffer.from([0, 0, 10, 112])]);
+            sendOut(user, response); 
+    });
 }
 
 startServer();
