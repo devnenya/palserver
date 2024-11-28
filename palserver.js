@@ -2,6 +2,12 @@ const net = require('net');
 const { buffer } = require('stream/consumers');
 
 const users = [];
+const PAL_BOT_ID = new Uint8Array([0, 0, 10, 112]);
+const PAL_STATUS_ONLINE = new Uint8Array([1]);
+const PAL_STATUS_OFFLINE = new Uint8Array([0]);
+const PAL_STATUS_AWAY = new Uint8Array([2]);
+
+
 let nextID = 1; // Start with ServerID 0x00000001
 
 class User {
@@ -14,7 +20,7 @@ class User {
         this.idName = '';
         this.idLocation = '';
         this.idEmail = '';
-        this.status = '';
+        this.status = PAL_STATUS_OFFLINE;
         this.buddyList = [];
         this.connection = connection;
         this.sByte = 129;
@@ -130,7 +136,7 @@ const handleConnection = (socket) => {
 
     socket.on('close', () => {
         console.log(`User ${user.serverID.toString(16).padStart(8, '0')} disconnected`);
-        broadcast_status(user, 0);
+        broadcast_status(user);
         removeUser(user);
     });
 
@@ -187,7 +193,9 @@ function processPacket (sByte, clientPacket, user) {
         switch (sByte) {
             case 129:
                 response = Buffer.concat([
-                    Buffer.from([0, 0, 0, 0, 3, 0, 1, 0, 3, 0, 0, 0, 0, 1, 32, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 4, 1, 33, 0, 0, 0, 1, 255, 255, 255, 255, 0, 0, 10, 112, 1, 71, 0, 0, 0, 0, 255, 255, 255, 255, 0, 3, 5, 3, 251, 0, 0, 3, 232, 0, 7, 79, 112, 101, 110, 80, 65, 76, 0, 3, 233, 0, 7, 104, 116, 116, 112, 58, 47, 47, 0, 0, 0, 0]),
+                    Buffer.from([0, 0, 0, 0, 3, 0, 1, 0, 3, 0, 0, 0, 0, 1, 32, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 4, 1, 33, 0, 0, 0, 1, 255, 255, 255, 255]),
+                    Buffer.from(PAL_BOT_ID), // Convert Uint8Array to Buffer
+                    Buffer.from([1, 71, 0, 0, 0, 0, 255, 255, 255, 255, 0, 3, 5, 3, 251, 0, 0, 3, 232, 0, 7, 79, 112, 101, 110, 80, 65, 76, 0, 3, 233, 0, 7, 104, 116, 116, 112, 58, 47, 47, 0, 0, 0, 0]),
                 ]);
                 sendOut(user, response);
                 break;
@@ -255,14 +263,14 @@ function processPacket (sByte, clientPacket, user) {
                 response = Buffer.concat([
                     Buffer.from([0, 29, 0]),       // Fixed header
                     userID,                        // User ID (Buffer)
-                    Buffer.from([
-                        0, 0, 10, 114, 0, 104, 0, 0, 0, 0, 0, 0, 0, 0, 10, 112,
-                    ]),
-                ]);
+                    Buffer.from([0, 0, 10, 114, 0, 104, 0, 0, 0, 0, 0, 0]),
+                    Buffer.from(PAL_BOT_ID)]);
                 sendOut(user, response);
                 
                 user.logged = true;
-                broadcast_status(user, 1);
+                user.status = PAL_STATUS_ONLINE;
+
+                broadcast_status(user);
                 break;                
         }
     } else {
@@ -338,17 +346,16 @@ function processPacket (sByte, clientPacket, user) {
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
                     console.log(`User Added: ${buddyNameText.length} ${buddyNameText}`);
                     findBuddy = findUserByName(buddyNameText);
-                    if (findBuddy >= 0) { 
+                    if ((findBuddy >= 0) && (users[findBudy].status == PAL_STATUS_ONLINE)) { 
                         buddyID = users[findBuddy].getServerIDBytes();
                         console.log(`User Online: ${AsciiString(buddyID)} ${buddyNameText}`);
 
                         response = Buffer.concat([
                             Buffer.from([0, 29, 0]),       // Fixed header
                             userID,                        // User ID (Buffer)
-                            Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0, 0, 12, 1]),
-                            TBL(buddyNameText),
-                            buddyID,
-                            Buffer.from([0, 0, 10, 112])]);
+                            Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
+                            TBL(users[findBuddy].status + buddyNameText + buddyID,
+                            Buffer.from(PAL_BOT_ID))]);
                         sendOut(user, response); 
                     }
 
@@ -382,15 +389,25 @@ function processPacket (sByte, clientPacket, user) {
                                 userID,                        // User ID (Buffer)
                                 Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
                                 TBL(Buffer.from([1]) + TBL(tempBuddyName) + buddyID),
-                                Buffer.from([0, 0, 10, 112])]);
+                                Buffer.from(PAL_BOT_ID)]);
                             sendOut(user, response); 
                         }
                     }
                     break;
                 
                 case 86:
-                        userstatus = clientPacket[19];
-                        broadcast_status(user, userstatus);
+                        switch (clientPacket[19]) {
+                            case PAL_STATUS_ONLINE:
+                                user.status = PAL_STATUS_ONLINE;
+                                break;
+                            case PAL_STATUS_OFFLINE:
+                                user.status = PAL_STATUS_OFFLINE;
+                                break;
+                            case PAL_STATUS_AWAY:
+                                user.status = PAL_STATUS_AWAY;
+                                break;
+                        }
+                        broadcast_status(user);
                         break;
                 
                 default:
@@ -492,23 +509,23 @@ function AsciiString(byteArray) {
 }
 
 //Protocol Functions
-function broadcast_status(buddy, status) {
+function broadcast_status(buddy) {
     const usersWithBuddy = findUsersWithBuddy(buddy.username);
+    buddyID = buddy.getServerIDBytes();
 
     // Loop through the users with the buddy and send them a message
     usersWithBuddy.forEach(tempuser => {
-        userID = tempuser.getServerIDBytes();
-        buddyID = buddy.getServerIDBytes();
+        userID = users[tempuser].getServerIDBytes();
+
             //0 29 0 0 0 109 13 0 0 10 114 48 111 0 0 0 0 0 21 1 0 14 112 114 105 110 99 101 115 115 64 98 117 100 100 121 0 0 109 13 0 0 10 112
             //0 29 0 0 0 109 13 0 0 10 114 48 111 0 0 0 0 0 21 0 0 14 112 114 105 110 99 101 115 115 64 98 117 100 100 121 0 0 109 13 0 0 10 112 
             response = Buffer.concat([
                 Buffer.from([0, 29, 0]),       // Fixed header
                 userID,                        // User ID (Buffer)
                 Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
-                TBL(status + TBL(tempBuddyName)),
-                buddyID,
-                Buffer.from([0, 0, 10, 112])]);
-            sendOut(user, response); 
+                TBL(buddy.status + TBL(buddy.username) + buddyID),
+                Buffer.from(PAL_BOT_ID)]);
+            sendOut(users[tempuser], response); 
     });
 }
 
