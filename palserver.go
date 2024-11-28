@@ -11,8 +11,16 @@ import (
 	"time"
 )
 
+type Buddy struct {
+	Name     string // Buddy's name
+	ServerID uint32 // Buddy's server ID
+	sID      []byte
+	Status   string // Buddy's current status
+}
+
 type User struct {
 	ServerID   uint32
+	sID        []byte
 	Logged     bool
 	Username   string
 	Password   string
@@ -21,7 +29,7 @@ type User struct {
 	IDLocation string
 	IDEmail    string
 	Status     string
-	BuddyList  []string // Array of buddylist names
+	BuddyList  []Buddy
 	Connection net.Conn // The user’s active connection
 	SByte      byte     // User-specific starting byte
 	IP         string
@@ -32,9 +40,11 @@ const (
 )
 
 var (
-	users          []User
-	nextID         uint32     = 1 // Start with ServerID 0x00000001
-	usersLock      sync.Mutex     // Protect access to the `users` slice and `nextID`
+	AllUsers       = make(map[string]*User)     // Concurrent-safe map needed
+	allUsersLock   sync.Mutex                   // Protects access to AllUsers
+	users          []User                       // Tracks currently active users
+	usersLock      sync.Mutex                   // Protects access to users slice
+	nextID         uint32                   = 1 // Start with ServerID 0x00000001
 	serverIPBytes  []byte
 	serverIPString string
 )
@@ -131,24 +141,104 @@ func assignServerID() uint32 {
 	return id
 }
 
+func RegisterUser(user *User) {
+	allUsersLock.Lock()
+	defer allUsersLock.Unlock()
+
+	AllUsers[user.Username] = user
+	fmt.Printf("User '%s' registered in AllUsers.\n", user.Username)
+}
+
+func UnregisterUser(username string) {
+	allUsersLock.Lock()
+	defer allUsersLock.Unlock()
+
+	if _, exists := AllUsers[username]; exists {
+		delete(AllUsers, username)
+		fmt.Printf("User '%s' removed from AllUsers.\n", username)
+	} else {
+		fmt.Printf("User '%s' not found in AllUsers.\n", username)
+	}
+}
+
 func addUser(user User) {
+	RegisterUser(&user)
+
 	usersLock.Lock()
 	defer usersLock.Unlock()
 
 	users = append(users, user)
+	fmt.Printf("User '%s' added to active users. Total users: %d\n", user.Username, len(users))
 }
 
 func removeUser(user User) {
+	// Unregister globally by username
+	UnregisterUser(user.Username)
+
+	// Remove from the session-specific users slice
 	usersLock.Lock()
 	defer usersLock.Unlock()
 
 	for i, u := range users {
 		if u.ServerID == user.ServerID {
 			users = append(users[:i], users[i+1:]...)
-			log.Printf("User %08x removed\n", user.ServerID)
+			fmt.Printf("User '%s' removed from active users.\n", user.Username)
 			return
 		}
 	}
+	fmt.Printf("User '%s' not found in active users.\n", user.Username)
+}
+
+func UpdateStatus(buddyName, newStatus string) {
+	allUsersLock.Lock()
+	defer allUsersLock.Unlock()
+	for _, user := range AllUsers {
+		for i, buddy := range user.BuddyList {
+			if buddy.Name == buddyName {
+				user.BuddyList[i].Status = newStatus
+			}
+		}
+	}
+}
+
+func UpdateServerID(buddyName string, newServerID uint32) {
+	allUsersLock.Lock()
+	defer allUsersLock.Unlock()
+	for _, user := range AllUsers {
+		for i, buddy := range user.BuddyList {
+			if buddy.Name == buddyName {
+				user.BuddyList[i].ServerID = newServerID
+			}
+		}
+	}
+}
+
+func (u *User) AddBuddy(buddy Buddy) {
+	for _, b := range u.BuddyList {
+		if b.Name == buddy.Name {
+			return // Buddy already exists
+		}
+	}
+	u.BuddyList = append(u.BuddyList, buddy)
+}
+
+func (u *User) RemoveBuddy(buddyName string) {
+	for i, b := range u.BuddyList {
+		if b.Name == buddyName {
+			u.BuddyList = append(u.BuddyList[:i], u.BuddyList[i+1:]...)
+			return
+		}
+	}
+}
+
+func (u *User) GetBuddyDataByName(username string) (*User, bool) {
+	for i := range users {
+		fmt.Println(users[i].Logged)
+		if users[i].Username == username {
+			return &users[i], true // Return a pointer to avoid copying the struct
+		}
+	}
+	return nil, false // Return nil if not found
 }
 
 // Handle each connection
@@ -187,6 +277,8 @@ func handleConnection(conn net.Conn) {
 	// Add the user to the slice
 	addUser(user)
 
+	user.sID = user.GetServerIDBytes()
+
 	log.Printf("New user connected: ServerID %08x\n", user.ServerID)
 
 	sendOut(&user, ipBytes)
@@ -213,7 +305,7 @@ func handleData(user *User, buffer []byte) {
 	// Check for heartbeat byte (128)
 	if buffer[0] == 128 {
 		// Send Heartbeat ACK
-		user.Connection.Write([]byte("Heartbeat ACK"))
+		user.Connection.Write([]byte{128})
 		if len(buffer) == 1 {
 			return
 		}
@@ -252,14 +344,14 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 	if !user.Logged {
 		switch sByteIn {
 		case 129:
-
+			//Server Parameters
 			part1 := []byte{0, 0, 0, 0, 3, 0, 1, 0, 3}
-			part2 := []byte{0, 0, 0, 0, 1, 32, 0, 0, 0, 7, 0, 0, 0, 0}
-			part3 := []byte{0, 0, 0, 4, 1, 33, 0, 0, 0, 1, 74, 208, 229, 29}
-			part4 := []byte{0, 0, 10, 112, 1, 71, 0, 0, 0, 0, 74, 208, 229, 29}
+			part2 := []byte{0, 0, 0, 0, 1, 32, 0, 0, 0, 7, 0, 0, 0, 0}            //Fake Bot 1, VP_SERVER_CORE = 32
+			part3 := []byte{0, 0, 0, 4, 1, 33, 0, 0, 0, 1, 255, 255, 255, 255}    //Fake Bot 2, VP_USERS_SERVICE = 33
+			part4 := []byte{0, 0, 10, 112, 1, 71, 0, 0, 0, 0, 255, 255, 255, 255} //Fake Bot 3, VP_BUDDY_LIST = 71
 			part5 := []byte{0, 3, 5, 3, 251, 0}
-			part6 := []byte{0, 3, 232, 0, 7, 79, 112, 101, 110, 80, 65, 76}
-			part7 := []byte{0, 3, 233, 0, 7, 104, 116, 116, 112, 58, 47, 47}
+			part6 := []byte{0, 3, 232, 0, 7, 79, 112, 101, 110, 80, 65, 76}  //Server Name, OpenPAL
+			part7 := []byte{0, 3, 233, 0, 7, 104, 116, 116, 112, 58, 47, 47} //Login URL, there is none, http://
 			part8 := []byte{0, 0, 0, 0}
 
 			packet := append(part1, part2...)
@@ -289,7 +381,9 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 				return
 			}
 			username := string(packetData[7 : 7+usernameLength])
-			fmt.Println("Username:", username) // For debugging
+			user.Username = username
+
+			fmt.Println("Username:", user.Username) // For debugging
 
 			// Extract the password (after the username)
 			passwordLength := UTBL(packetData[9+usernameLength : 11+usernameLength]) // Extract the password length
@@ -297,8 +391,6 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 			password := string(packetData[11+usernameLength : 13+usernameLength+passwordLength])
 			fmt.Println("Password:", password) // For debugging
 
-			// Now, set the user’s credentials
-			user.Username = username
 			user.Password = password
 
 			part1 := []byte{0, 12, 0, 0, 0}
@@ -312,16 +404,17 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 			sendOut(user, packet)
 			break
 		case 132:
+			//User Navigated to Community Lobby
 			urlLength := UTBL(packetData[13:15])
 			urlBytes := packetData[15 : 15+urlLength]
 
 			fmt.Println("URL:", string(urlBytes)) // For debugging
 
-			part1 := []byte{0, 15, 0, 0, 1}
-			part2 := user.GetServerIDBytes()
-			part3 := []byte{0, 3, 0, 0, 0, 38, 8, 128}
+			part1 := []byte{0, 15, 0, 0, 1} // 0, 1 represent RoomsBeen, the number of times the user navigates, as we do this only once this doesn't need to be saved and iterated
+			part2 := user.sID
+			part3 := []byte{0, 3, 0, 0, 0, 38, 8, 128} //Room Header Data
 			part4 := TBL(string(urlBytes))
-			part5 := []byte{1, 1, 0, 0, 0, 40, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+			part5 := []byte{1, 1, 0, 0, 0, 40, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0} //Empty Room Data
 
 			// Create the packet by appending each part
 			packet := append(part1, part2...) // Directly append the bytes from part2 (ServerID bytes)
@@ -336,13 +429,14 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 			sendOut(user, packet)
 
 			newpart1 := []byte{0, 29, 0}
-			newpart2 := user.GetServerIDBytes()
+			newpart2 := user.sID
 			newpart3 := []byte{0, 0, 10, 114, 0, 104, 0, 0, 0, 0, 0, 0, 0, 0, 10, 112}
 
 			packet2 := append(newpart1, newpart2...)
 			packet2 = append(packet2, newpart3...)
 
 			sendOut(user, packet2)
+			user.Status = "Online"
 			user.Logged = true
 			break
 
@@ -350,6 +444,61 @@ func processPacket(sByteIn byte, packetData []byte, user *User) {
 	}
 	switch packetData[1] {
 	case 28:
+		//Add Buddy
+		//0 28 0 0 0 4 174 0 0 0 0 0 65 0 0 0 0 0 7 0 5 116 105 109 109 121 0 0 10 112
+
+		//Remove Buddy
+		//0 28 0 0 0 4 174 0 0 0 0 0 82 0 0 0 0 0 7 0 5 116 105 109 109 121 0 0 10 112
+
+		switch packetData[12] {
+		case 65: // Add Budy
+			buddyNameText := packetData[20 : len(packetData)-4]
+			fmt.Println("User Added:", string(buddyNameText))
+			buddy, found := user.GetBuddyDataByName(string(buddyNameText))
+			if found {
+				fmt.Println("FOUND:", string(buddyNameText))
+
+				user.AddBuddy(Buddy{
+					Name:     string(buddyNameText), // Correct field: Name
+					ServerID: buddy.ServerID,        // Correct field: ServerID
+					sID:      buddy.sID,
+					Status:   buddy.Status, // Correct field: Status
+				})
+				if buddy.Status == "Online" {
+					// Byte slices for fixed parts
+					part1 := []byte{0, 29, 0}
+					part3 := []byte{0, 0, 10, 114, 48, 111, 0, 0, 0, 0, 0, 12, 1}
+					part4 := TBL(string(buddyNameText)) // Assuming TBL returns []byte
+					part6 := []byte{0, 0, 10, 112}
+
+					// Directly append user.sID and buddy.sID since they are already []byte
+					part2 := user.sID
+					part5 := buddy.sID
+
+					// Combine all parts into the final packet
+					packet := append(part1, part2...)
+					packet = append(packet, part3...)
+					packet = append(packet, part4...)
+					packet = append(packet, part5...)
+					packet = append(packet, part6...)
+
+					// Send the packet
+					sendOut(user, packet)
+				}
+
+			}
+			break
+
+		case 82: // Remove Buddy
+			buddyNameText := packetData[20 : len(packetData)-4]
+			fmt.Printf("User Removed:", buddyNameText)
+			break
+
+		case 83: // Buddylist
+			break
+
+		}
+
 		fmt.Println("Got it!")
 		break
 	}
