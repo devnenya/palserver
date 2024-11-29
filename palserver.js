@@ -143,10 +143,10 @@ function findUserByName(username) {
     return users.findIndex(u => u.username.toLowerCase() === username.toString().toLowerCase());
 }
 
-function findUsersByString(username) {
-    if (!username) return []; // Return an empty array for invalid input
+function findUsersByString(searchString) {
+    if (!searchString) return []; // Return an empty array for invalid input
     return users.filter(u =>
-        u.username.toLowerCase().includes(username.toString().toLowerCase())
+        u.username.toLowerCase().includes(searchString.toString().toLowerCase())
     );
 }
 
@@ -400,8 +400,8 @@ function processPacket (sByte, clientPacket, user) {
             break;
         case 10:
             //Handle Search Functionality
-            searchTextSize = UTBL(clientPacket.slice(11, 13));
-            searchTextData = clientPacket.slice(13, 13 + searchTextSize);
+            searchTextSize = UTBL(clientPacket.slice(15, 17));
+            searchTextData = Buffer.from(clientPacket.slice(17, 17 + searchTextSize), 'ascii');
             locate_results = findUsersByString(searchTextData);
             returnsize = twoByteLength(locate_results.length);
             
