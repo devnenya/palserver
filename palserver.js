@@ -1,7 +1,47 @@
+//PAL Server v0.1
+//November 29, 2024
+//catielovexo@gmail.com
+
 const net = require('net');
+const http = require('http');
+
 const { buffer } = require('stream/consumers');
 
 const users = [];
+
+// Track server start time
+const serverStartTime = Date.now();
+
+// HTTP API Gateway
+const httpServer = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/stats') {
+        const onlineUsers = users.length;
+        const currentTime = Date.now();
+        const uptimeMillis = currentTime - serverStartTime;
+
+        // Convert uptime to a readable format (hours, minutes, seconds)
+        const uptimeSeconds = Math.floor(uptimeMillis / 1000);
+        const hours = Math.floor(uptimeSeconds / 3600);
+        const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+        const seconds = uptimeSeconds % 60;
+
+        const response = {
+            timestamp: new Date().toISOString(),
+            onlineUsers: onlineUsers,
+            uptime: `${hours}h ${minutes}m ${seconds}s`
+        };
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(response));
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+    }
+});
+
+httpServer.listen(8080, () => {
+    console.log('HTTP API Gateway listening on port 8080');
+});
 
 const SERVER_PARAM_COUNT = new Uint8Array([0, 3]); //3 Params required for minimum PAL Compatibility
 const SERVER_PARAM = new Uint8Array([3, 251]);
@@ -31,7 +71,7 @@ class User {
         this.logged = false;
         this.username = '';
         this.password = '';
-        this.avatarData = null;
+        this.avatarData = new Uint8Array();
         this.idName = '';
         this.idLocation = '';
         this.idEmail = '';
@@ -101,6 +141,13 @@ const removeUser = (user) => {
 
 function findUserByName(username) {
     return users.findIndex(u => u.username.toLowerCase() === username.toString().toLowerCase());
+}
+
+function findUsersByString(username) {
+    if (!username) return []; // Return an empty array for invalid input
+    return users.filter(u =>
+        u.username.toLowerCase().includes(username.toString().toLowerCase())
+    );
 }
 
 function findUserByID(ID) {
@@ -351,28 +398,65 @@ function processPacket (sByte, clientPacket, user) {
                 sendOut(users[findBuddy], response); 
                 }
             break;
+        case 10:
+            //Handle Search Functionality
+            searchTextSize = UTBL(clientPacket.slice(11, 13));
+            searchTextData = clientPacket.slice(13, 13 + searchTextSize);
+            locate_results = findUsersByString(searchTextData);
+            returnsize = twoByteLength(locate_results.length);
+            
+            let results = Buffer.alloc(0);
+            
+            for (const result of locate_results) {
+                results = Buffer.concat([
+                    results,
+                    result.getServerIDBytes(),
+                    Buffer.from([1, 0, 1]),
+                    TBL(result.username),
+                    Buffer.from([2, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 8, 32, 0, 0, 0, 0, 0, 0, 4, 1, 1, 0, 0])
+                ]);
+            }
+            
+            response = Buffer.concat([
+                Buffer.from([0, 10, 0]),
+                user.getServerIDBytes(),
+                Buffer.from([0, 0, 0, 1]),
+                TBL(searchTextData),
+                Buffer.from([0, 0]),
+                returnsize,
+                results
+            ]);
+            
+            sendOut(user, response);            
+            break;
         
         case 15:
             // Handle room data
-            //0 15 0 0 1 0 0 68 80 0 21 1 1 0 0 70 222
             switch (clientPacket[10]) {
                 case 21:
-                    tID = AsciiString(clientPacket.slice(13, 17));
-                    findBuddy = findUserByID(tID);
-                    if (findBuddy >= 0) {
-                    response = Buffer.concat([
-                        Buffer.from([0, 15, 0, 0, 1]),       // Fixed header
-                        userID,                        // User ID (Buffer)
-                        Buffer.from([0, 21, 1, 1]),
-                        tID,
-                        FBL(users[findBuddy].avatarData)]);
-                    sendOut(user, response);
+                    tID = AsciiString(clientPacket.slice(5, 9)); // Extract tID from the packet
+                    const findBuddy = findUserByID(tID); // Find the buddy by tID
+                    console.log(`User AV Request: ${user.username} ${users[findBuddy].username}`);
+
+                    
+                    if (findBuddy >= 0) {  // Ensure buddy is found (index >= 0)
+            
+                        response = Buffer.concat([
+                            Buffer.from([0, 15, 0, 0, 1]),  // Fixed header
+                            clientPacket.slice(5, 9),
+                            Buffer.from([0, 21, 1, 1]),     // Packet flags or additional data
+                            Buffer.from(users[findBuddy].avatarData)
+                        ]);
+            
+                        sendOut(user, response); // Send the response to the user
+                        console.log(`User AV Sent: ${user.username} ${users[findBuddy].username}`);
                     }
                     break;
+            
 
                 case 22:
-                    avdata = clientPacket.slice(17);
-                    user.avatarData = avdata;
+                    avdata = clientPacket.slice(13);
+                    user.avatarData = new Uint8Array(avdata);
                     break;
             }
 
