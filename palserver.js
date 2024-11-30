@@ -1,15 +1,11 @@
-//PAL Server v0.1
+//PAL Server v0.2
 //November 29, 2024
 //catielovexo@gmail.com
 
 const net = require('net');
 const http = require('http');
-
 const { buffer } = require('stream/consumers');
-
 const users = [];
-
-// Track server start time
 const serverStartTime = Date.now();
 
 // HTTP API Gateway
@@ -43,12 +39,24 @@ httpServer.listen(8080, () => {
     console.log('HTTP API Gateway listening on port 8080');
 });
 
+const FAKE_USER_IP = new Uint8Array([255, 255, 255, 255]);
+
 const SERVER_PARAM_COUNT = new Uint8Array([0, 3]); //3 Params required for minimum PAL Compatibility
 const SERVER_PARAM = new Uint8Array([3, 251]);
 const SERVER_TITLE = TBL('palserver');
 const SERVER_TITLE_PARAM = new Uint8Array([3, 232]);
 const REGISTRATION_PAGE = TBL('http://');
 const REGISTRATION_PAGE_PARAM = new Uint8Array([3, 233]);
+
+const PAL_USER_TYPE = new Uint8Array([2]);
+
+const PACKET_MAIN_DM = 5;
+const PACKET_MAIN_LOCATE = 10;
+const PACKET_MAIN_BUDDY = 28;
+const PACKET_MAIN_ROOM = 15;
+const PAL_TYPE_ADD = 65;
+const PAL_TYPE_REMOVE = 82;
+const PAL_TYPE_LIST = 83;
 
 const SERVER_BOT_COUNT = new Uint8Array([0, 3]); //3 Bots required for minimum PAL Compatibility
 const FAKE_BOT_IP = new Uint8Array([255, 255, 255, 255]);
@@ -62,6 +70,8 @@ const PAL_STATUS_ONLINE = new Uint8Array([1]);
 const PAL_STATUS_OFFLINE = new Uint8Array([0]);
 const PAL_STATUS_AWAY = new Uint8Array([2]);
 
+const ROOM_TYPE_PRIVATE = new Uint8Array([8, 32]);
+
 
 let nextID = 5; // Start with ServerID 0x00000001
 
@@ -71,7 +81,7 @@ class User {
         this.logged = false;
         this.username = '';
         this.password = '';
-        this.avatarData = new Uint8Array();
+        this.avatarData = Buffer.alloc(0);
         this.idName = '';
         this.idLocation = '';
         this.idEmail = '';
@@ -111,6 +121,16 @@ class User {
     }
 }
 
+const assignServerID = () => nextID++;
+const addUser = (user) => users.push(user);
+const removeUser = (user) => {
+    const index = users.findIndex(u => u.serverID === user.serverID);
+    if (index >= 0) {
+        users.splice(index, 1);
+        console.log(`User ${user.serverID.toString(16).padStart(8, '0')} removed`);
+    }
+};
+
 function findUsersWithBuddy(buddy) {
     const usersWithBuddy = [];
 
@@ -125,19 +145,6 @@ function findUsersWithBuddy(buddy) {
 
     return usersWithBuddy;
 }
-
-
-const assignServerID = () => nextID++;
-
-const addUser = (user) => users.push(user);
-
-const removeUser = (user) => {
-    const index = users.findIndex(u => u.serverID === user.serverID);
-    if (index >= 0) {
-        users.splice(index, 1);
-        console.log(`User ${user.serverID.toString(16).padStart(8, '0')} removed`);
-    }
-};
 
 function findUserByName(username) {
     return users.findIndex(u => u.username.toLowerCase() === username.toString().toLowerCase());
@@ -199,6 +206,7 @@ const handleConnection = (socket) => {
 
     socket.on('close', () => {
         console.log(`User ${user.serverID.toString(16).padStart(8, '0')} disconnected`);
+        user.status = PAL_STATUS_OFFLINE;
         broadcast_status(user);
         removeUser(user);
     });
@@ -225,7 +233,7 @@ function handleData (user) {
 };
 
 function parsePacket(buffer) {
-    if (buffer.length < 5) return null; // Packet too short to contain meaningful data.
+    if (buffer.length < 5) return null;
 
     const sByte = buffer[0];
     const length = UFBL(buffer.slice(1, 5)); // Extract packet length.
@@ -283,17 +291,16 @@ function processPacket (sByte, clientPacket, user) {
                 ]);
                 sendOut(user, response);
                 break;
+
             case 130:
                 if (clientPacket.length < 5) {
                     console.log("Error: Packet too short to contain valid data.");
                     return;
                 }
             
-                // Skipping the fixed part (0 11 0 0 0)
                 const fixedPart = clientPacket.slice(0, 5);
                 console.log("Fixed part:", fixedPart); // For debugging
             
-                // Extract the username length from the next 2 bytes
                 const usernameLength = UTBL(clientPacket.slice(5, 7));
                 if (clientPacket.length < 7 + usernameLength) {
                     console.log("Error: Packet too short to contain username.");
@@ -303,8 +310,6 @@ function processPacket (sByte, clientPacket, user) {
                 console.log("Username:", username); // For debugging
                 // Extract the password length
                 const passwordLength = UTBL(clientPacket.slice(14 + usernameLength, 16 + usernameLength));
-                console.log("Pass Length:", passwordLength); // For debugging
-
                 if (clientPacket.length < 10 + usernameLength + passwordLength) {
                     console.log("Error: Packet too short to contain password.");
                     return;
@@ -312,7 +317,6 @@ function processPacket (sByte, clientPacket, user) {
                 const password = clientPacket.slice(16 + usernameLength, 18 + usernameLength + passwordLength).toString('utf-8');
                 console.log("Password:", password); // For debugging
             
-                // Now, set the user's credentials
                 user.username = username;
                 user.password = password;
             
@@ -325,6 +329,7 @@ function processPacket (sByte, clientPacket, user) {
                 response = Buffer.concat([part1, part2, part3, part4]);
                 sendOut(user, response);
                 break;
+
             case 132:
                 const urlLength = UTBL(clientPacket.slice(13, 15));
                 const urlBytes = clientPacket.slice(15, 15 + urlLength);
@@ -359,7 +364,7 @@ function processPacket (sByte, clientPacket, user) {
         }
     } else {
         switch(clientPacket[1]) {
-        case 5: // Handle DMs
+        case PACKET_MAIN_DM: // Handle DMs
             let messagesize = UTBL(clientPacket.slice(7, 9)); // Extract message size
             let messagetext = clientPacket.slice(9, 9 + messagesize); // Extract message text
 
@@ -398,8 +403,8 @@ function processPacket (sByte, clientPacket, user) {
                 sendOut(users[findBuddy], response); 
                 }
             break;
-        case 10:
-            //Handle Search Functionality
+
+        case PACKET_MAIN_LOCATE:
             searchTextSize = UTBL(clientPacket.slice(15, 17));
             searchTextData = Buffer.from(clientPacket.slice(17, 17 + searchTextSize), 'ascii');
             locate_results = findUsersByString(searchTextData);
@@ -413,7 +418,14 @@ function processPacket (sByte, clientPacket, user) {
                     result.getServerIDBytes(),
                     Buffer.from([1, 0, 1]),
                     TBL(result.username),
-                    Buffer.from([2, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 8, 32, 0, 0, 0, 0, 0, 0, 4, 1, 1, 0, 0])
+                    PAL_USER_TYPE,
+                    TBL(result.idName),
+                    TBL(result.idLocation),
+                    TBL(result.idEmail),
+                    FAKE_USER_IP,
+                    Buffer.from([0, 0, 0, 0]), //TBL ROOMURL, TBL ROOMNAME
+                    ROOM_TYPE_PRIVATE,
+                    Buffer.from([0, 0, 0, 0, 0, 0, 4, 1, 1, 0, 0])
                 ]);
             }
             
@@ -426,17 +438,16 @@ function processPacket (sByte, clientPacket, user) {
                 returnsize,
                 results
             ]);
-            
+
             sendOut(user, response);            
             break;
         
-        case 15:
-            // Handle room data
+        case PACKET_MAIN_ROOM:
             switch (clientPacket[10]) {
                 case 21:
                     tID = AsciiString(clientPacket.slice(5, 9)); // Extract tID from the packet
                     const findBuddy = findUserByID(tID); // Find the buddy by tID
-                    console.log(`User AV Request: ${user.username} ${users[findBuddy].username}`);
+                    console.log(`User AV Request: ${user.username} -> ${users[findBuddy].username}`);
 
                     
                     if (findBuddy >= 0) {  // Ensure buddy is found (index >= 0)
@@ -449,21 +460,23 @@ function processPacket (sByte, clientPacket, user) {
                         ]);
             
                         sendOut(user, response); // Send the response to the user
-                        console.log(`User AV Sent: ${user.username} ${users[findBuddy].username}`);
+                        console.log(`User AV Sent: ${users[findBuddy].username} -> ${user.username} `);
                     }
                     break;
             
 
                 case 22:
                     avdata = clientPacket.slice(13);
+                    console.log(`User Updated Avatar: ${user.username} ${avdata.length}`);
                     user.avatarData = new Uint8Array(avdata);
                     break;
             }
 
             break;
-        case 28: //PAL Functions
+
+        case PACKET_MAIN_BUDDY: //PAL Functions
             switch (clientPacket[12]) {
-                case 65: //Add Buddy
+                case PAL_TYPE_ADD: //Add Buddy
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
                     console.log(`User Added: ${buddyNameText.length} ${buddyNameText}`);
                     findBuddy = findUserByName(buddyNameText);
@@ -491,13 +504,14 @@ function processPacket (sByte, clientPacket, user) {
                     }
 
                     break;
-                case 82: //Remove Buddy
+
+                case PAL_TYPE_REMOVE: //Remove Buddy
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
                     user.removeBuddy(buddyNameText);
                     console.log(`User Removed: ${buddyNameText.length} ${buddyNameText}`);
                     break;
 
-                case 83: // Buddylist send
+                case PAL_TYPE_LIST: // Buddylist send
                     const friendCount = UTBL(clientPacket.slice(24, 26));
                     console.log(`Buddylist: ${friendCount} friends`);
                     let buddyBegin = 26;
@@ -525,7 +539,6 @@ function processPacket (sByte, clientPacket, user) {
                             }
                         }
                     }
-                    //0 29 0 0 0 0 5 0 0 0 1 48 117 0 0 0 0 0 2 0 1 0 0 0 2
                     response = Buffer.concat([
                         Buffer.from([0, 29, 0]),       // Fixed header
                         userID,                        // User ID (Buffer)
@@ -534,8 +547,8 @@ function processPacket (sByte, clientPacket, user) {
                         Buffer.from(
                             FBL(
                                 Buffer.concat([
-                                    twoByteLength(onlineCount),             // Online count as a 2-byte buffer
-                                    tempPacket,                             // Temporary packet
+                                    twoByteLength(onlineCount), // Online count as a 2-byte buffer
+                                    tempPacket,
                                     Buffer.from([0, 0]),
                                 ])
                             )
@@ -651,7 +664,6 @@ function AsciiString(byteArray) {
         return "";
     }
 
-    // Convert each byte in the array to its ASCII value
     return Array.from(byteArray).join(' ');
 }
 
@@ -661,7 +673,6 @@ function broadcast_status(user) {
     console.log(`Looking for ${user.username} buddylist users.`);
     buddyID = user.getServerIDBytes();
 
-    // Loop through the users with the buddy and send them a message
     usersWithBuddy.forEach(tempuser => {
         console.log(`Sending update for ${user.username} to ${tempuser.username}`);
 
