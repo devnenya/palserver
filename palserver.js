@@ -72,7 +72,6 @@ const PAL_STATUS_AWAY = new Uint8Array([2]);
 
 const ROOM_TYPE_PRIVATE = new Uint8Array([8, 32]);
 
-
 let nextID = 5; // Start with ServerID 0x00000001
 
 class User {
@@ -200,9 +199,17 @@ const handleConnection = (socket) => {
     sendOut(user, Buffer.from(ipBytes, 'ascii'));
 
     socket.on('data', (data) => {
-        user.buffer = Buffer.concat([user.buffer, data]);
-        handleData(user);
+        try {
+            console.log(`Data received from ${user.username}: ${data.length} bytes.`);
+            // Append received data to the user's buffer
+            appendBuffer(user, data);
+        } catch (error) {
+            console.error(`Error while processing data from client: ${error.message}`);
+            user.connection.destroy();
+            removeUser(user);
+        }
     });
+    
 
     socket.on('close', () => {
         console.log(`User ${user.serverID.toString(16).padStart(8, '0')} disconnected`);
@@ -214,44 +221,52 @@ const handleConnection = (socket) => {
     socket.on('error', (err) => console.error(`Error on connection with user ${user.serverID}:`, err));
 };
 
-function handleData (user) {
-    if (user.buffer[0] === 128) {
-        user.connection.write(buffer[0]);
-        user.buffer = user.buffer.slice(1);
+function appendBuffer(user, data) {
+    try {
+        console.log(`Appending data to ${user.username} buffer.`);
+
+        user.buffer = Buffer.concat([user.buffer, data]); // Append new data
+        handleData(user); // Process any complete packets
+    } catch (error) {
+        console.error('Error in appendBuffer:', error);
     }
-
-    if (user.buffer.length < 5) return;
-
-    const packetLength = UFBL(user.buffer.slice(1, 5));
-    if (packetLength < 5) return;
-
-    const packetData = user.buffer.slice(5, packetLength);
-    processPacket(user.buffer[0], packetData, user);
-
-    user.buffer = user.buffer.slice(packetLength + 5);
-    if (user.buffer.length > 0) { handleData(user); }
-};
-
-function parsePacket(buffer) {
-    if (buffer.length < 5) return null;
-
-    const sByte = buffer[0];
-    const length = UFBL(buffer.slice(1, 5)); // Extract packet length.
-
-    if (buffer.length < 5 + length) return null; // Wait for the full packet to arrive.
-
-    const packetData = buffer.slice(5, 5 + length);
-    return { sByte, length, packetData, totalLength: 5 + length };
 }
 
 function handleData(user) {
-    while (user.buffer.length > 0) {
-        const packet = parsePacket(user.buffer);
-        if (!packet) break; // Incomplete packet, wait for more data.
+    try {
+        console.log(`Processing ${user.username} data buffer.`);
 
-        const { sByte, packetData, totalLength } = packet;
-        user.buffer = user.buffer.slice(totalLength); // Remove processed packet from buffer.
-        processPacket(sByte, packetData, user);
+        // Check for any control signals or immediate responses
+        if (user.buffer.length > 0 && user.buffer[0] === 128) {
+            console.log(`HEARTBEAT received from ${user.username}`);
+            user.buffer = user.buffer.slice(1); // Remove processed control byte
+        }
+
+        // Process complete packets
+        while (user.buffer.length >= 5) { // Minimum header size
+            // Extract packet length from the buffer
+            const packetLength = UFBL(user.buffer.slice(1, 5)); // Your length extraction logic
+            if (isNaN(packetLength) || packetLength < 0) {
+                throw new Error(`Invalid packet length: ${packetLength}`);
+            }
+
+            // Check if the full packet is available in the buffer
+            if (user.buffer.length < packetLength + 5) {
+                console.log(`Incomplete packet, waiting for more data, expected ${packetLength} received: ${user.buffer.length}`);
+                console.log(`${AsciiString(user.buffer)}`);
+                break; // Wait for the next chunk of data
+            }
+
+            // Extract and process the complete packet
+            const packetData = user.buffer.slice(5, 5 + packetLength);
+            processPacket(user.buffer[0], packetData, user); // Your packet processing logic
+
+            // Remove processed packet from the buffer
+            user.buffer = user.buffer.slice(5 + packetLength);
+        }
+    } catch (error) {
+        console.error('Error in handleData:', error);
+        user.connection.destroy(); // Optionally terminate connection for critical errors
     }
 }
 
@@ -259,7 +274,7 @@ function processPacket (sByte, clientPacket, user) {
     let response = Buffer.alloc(0);
     const userID = user.getServerIDBytes();
 
-    console.log(`${user.serverID} IN ${sByte}: ${AsciiString(clientPacket)}`);
+    console.log(`${user.username} IN ${sByte}: ${AsciiString(clientPacket)}`);
     if (!user.logged) {
         switch (sByte) {
             case 129:
@@ -582,19 +597,29 @@ function processPacket (sByte, clientPacket, user) {
     }
 };
 
-function sendOut (user, data) {
+function sendOut(user, data) {
     if (!user.connection) {
         console.error('User is not connected');
         return;
     }
 
+    // Prepare the packet
     const packet = Buffer.concat([Buffer.from([user.sByte]), FBL(data)]);
-    user.connection.write(packet);
+    const canWrite = user.connection.write(packet);
 
+    // Cycle `sByte` between 129 and 255
     user.sByte = user.sByte === 255 ? 129 : user.sByte + 1;
 
-    console.log(`OUT: ${AsciiString(packet)}`);
-};
+    console.log(`${user.username} OUT: ${AsciiString(packet)}`);
+
+    // Handle backpressure if the write buffer is full
+    if (!canWrite) {
+        console.warn('Backpressure detected, waiting for drain event');
+        user.connection.once('drain', () => {
+            console.log('Drain event triggered, resuming writes');
+        });
+    }
+}
 
 function FBL(theString) {
     const lengthBuffer = Buffer.from(fourByteLength(theString.length));
