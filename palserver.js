@@ -1,10 +1,80 @@
-//PAL Server v0.2
-//November 29, 2024
+//PAL Server
+const VERSION = '0.4.1';
+//November 30, 2024
 //catielovexo@gmail.com
 
+console.log(`Welcome to PAL Server ${VERSION}`);
+console.log('');
+
+const path = require('path');
+const fs = require('fs');
 const net = require('net');
 const http = require('http');
-const { buffer } = require('stream/consumers');
+const dbPath = path.join(process.cwd(), 'database.json'); 
+
+// Initialize or load the database
+let db = { users: [] };
+
+if (fs.existsSync(dbPath)) {
+    try {
+        const rawData = fs.readFileSync(dbPath, 'utf8');
+        db = JSON.parse(rawData);
+        console.log(`${now_at()} Database loaded successfully.`);
+    } catch (err) {
+        console.error(`${now_at()} Error reading database:`, err.message);
+    }
+} else {
+    console.log(`${now_at()} Database file not found. Creating a new one.`);
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
+}
+
+// Function to save the database to file
+function saveDatabase() {
+    try {
+        fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
+    } catch (err) {
+        console.error(`${now_at()} Error saving database:`, err.message);
+    }
+}
+
+// Function to register a user
+function registerUser(username, password) {
+    if (db.users.find((user) => user.username === username)) {
+        console.error(`${now_at()} User ${username} already exists.`);
+        return false;
+    }
+
+    const newUser = {
+        id: db.users.length > 0 ? db.users[db.users.length - 1].id + 1 : 1,
+        username,
+        password,
+    };
+
+    db.users.push(newUser);
+    saveDatabase();
+    console.log(`${now_at()} User ${username} registered successfully.`);
+    return true;
+}
+
+// Function to validate a user
+function validateUser(username, password) {
+    const user = db.users.find((user) => user.username === username);
+
+    if (!user) {
+        console.log(`${now_at()} User ${username} not found. Registering.`);
+        registerUser(username, password);
+        return true;
+    }
+
+    if (user.password !== password) {
+        console.error(`${now_at()} Password mismatch for user ${username}.`);
+        return false;
+    }
+
+    console.log(`${now_at()} User ${username} validated successfully.`);
+    return true;
+}
+
 const users = [];
 const serverStartTime = Date.now();
 
@@ -36,7 +106,7 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.listen(8080, () => {
-    console.log('HTTP API Gateway listening on port 8080');
+    console.log(`${now_at()} HTTP API Gateway listening on port 8080`);
 });
 
 const FAKE_USER_IP = new Uint8Array([255, 255, 255, 255]);
@@ -45,8 +115,11 @@ const SERVER_PARAM_COUNT = new Uint8Array([0, 3]); //3 Params required for minim
 const SERVER_PARAM = new Uint8Array([3, 251]);
 const SERVER_TITLE = TBL('palserver');
 const SERVER_TITLE_PARAM = new Uint8Array([3, 232]);
-const REGISTRATION_PAGE = TBL('http://');
+const REGISTRATION_PAGE = TBL('http://pal.nenya.dev:81/');
 const REGISTRATION_PAGE_PARAM = new Uint8Array([3, 233]);
+
+const NEW_LOGIN_RESPONSE = new Uint8Array([223]);
+const INVALID_LOGIN_RESPONSE = new Uint8Array([235]);
 
 const PAL_USER_TYPE = new Uint8Array([2]);
 
@@ -96,9 +169,8 @@ class User {
         addBuddy(buddy) {
             if (!this.buddyList.includes(buddy)) {
                 this.buddyList.push(buddy);
-                console.log(`Buddy added: ${buddy}`);
             } else {
-                console.log(`Buddy ${buddy} is already in the list.`);
+                console.log(`${now_at()} ${this.username} Buddy ${buddy} is already listed.`);
             }
         }
     
@@ -107,9 +179,8 @@ class User {
             const index = this.buddyList.indexOf(buddy);
             if (index !== -1) {
                 this.buddyList.splice(index, 1);
-                console.log(`Buddy removed: ${buddy}`);
             } else {
-                console.log(`Buddy ${buddy} not found in the list.`);
+                console.log(`${now_at()} ${this.username }Buddy ${buddy} not found in the list.`);
             }
         }
 
@@ -123,10 +194,11 @@ class User {
 const assignServerID = () => nextID++;
 const addUser = (user) => users.push(user);
 const removeUser = (user) => {
+    user.connection.destroy();
     const index = users.findIndex(u => u.serverID === user.serverID);
     if (index >= 0) {
         users.splice(index, 1);
-        console.log(`User ${user.serverID.toString(16).padStart(8, '0')} removed`);
+        console.log(`${now_at()} ${user.serverID} User removed.`);
     }
 };
 
@@ -135,7 +207,6 @@ function findUsersWithBuddy(buddy) {
 
     // Loop through all users in the users array
     users.forEach(user => {
-        console.log(`Checking ${user.username} against ${buddy.username}`);
         // Check if the buddyName is in the user's buddyList
         if (user.buddyList.includes(buddy.username)) {
             usersWithBuddy.push(user);
@@ -180,12 +251,12 @@ const ipToBytes = (ip) => {
 
 const startServer = async () => {
     try {
-        console.log(`Server started on port 1533`);
+        console.log(`${now_at()} Server started on port 1533`);
 
         const server = net.createServer(handleConnection);
         server.listen(1533);
     } catch (err) {
-        console.error('Error starting server:', err);
+        console.error(`${now_at()} Error starting server:`, err);
     }
 };
 
@@ -195,16 +266,15 @@ const handleConnection = (socket) => {
     const user = new User(socket, ipBytes);
     addUser(user);
 
-    console.log(`New user connected: ServerID ${user.serverID.toString(16).padStart(8, '0')}`);
+    console.log(`${now_at()} ${user.serverID} New user connected`);
     sendOut(user, Buffer.from(ipBytes, 'ascii'));
 
     socket.on('data', (data) => {
         try {
-            console.log(`Data received from ${user.username}: ${data.length} bytes.`);
             // Append received data to the user's buffer
             appendBuffer(user, data);
         } catch (error) {
-            console.error(`Error while processing data from client: ${error.message}`);
+            console.error(`${now_at()} ${user.serverID} Error while processing data from client: ${error.message}`);
             user.connection.destroy();
             removeUser(user);
         }
@@ -212,33 +282,29 @@ const handleConnection = (socket) => {
     
 
     socket.on('close', () => {
-        console.log(`User ${user.serverID.toString(16).padStart(8, '0')} disconnected`);
+        console.log(`${now_at()} ${user.serverID} User disconnected`);
         user.status = PAL_STATUS_OFFLINE;
         broadcast_status(user);
         removeUser(user);
     });
 
-    socket.on('error', (err) => console.error(`Error on connection with user ${user.serverID}:`, err));
+    socket.on('error', (err) => console.error(`${now_at()} ${user.serverID} CONN-Error-> `, err));
 };
 
 function appendBuffer(user, data) {
     try {
-        console.log(`Appending data to ${user.username} buffer.`);
-
         user.buffer = Buffer.concat([user.buffer, data]); // Append new data
         handleData(user); // Process any complete packets
     } catch (error) {
-        console.error('Error in appendBuffer:', error);
+        console.error(`${now_at()} ${username} Error in appendBuffer-> ${error}`);
     }
 }
 
 function handleData(user) {
     try {
-        console.log(`Processing ${user.username} data buffer.`);
-
         // Check for any control signals or immediate responses
         if (user.buffer.length > 0 && user.buffer[0] === 128) {
-            console.log(`HEARTBEAT received from ${user.username}`);
+            console.log(`${now_at()} ${user.username} HEARTBEAT received`);
             user.buffer = user.buffer.slice(1); // Remove processed control byte
         }
 
@@ -247,13 +313,13 @@ function handleData(user) {
             // Extract packet length from the buffer
             const packetLength = UFBL(user.buffer.slice(1, 5)); // Your length extraction logic
             if (isNaN(packetLength) || packetLength < 0) {
-                throw new Error(`Invalid packet length: ${packetLength}`);
+                throw new Error(`${now_at()} ${user.username} Invalid packet length: ${packetLength}`);
             }
 
             // Check if the full packet is available in the buffer
             if (user.buffer.length < packetLength + 5) {
-                console.log(`Incomplete packet, waiting for more data, expected ${packetLength} received: ${user.buffer.length}`);
-                console.log(`${AsciiString(user.buffer)}`);
+                console.log(`${now_at()} ${user.username} Incomplete packet, waiting for more data, expected ${packetLength} received: ${user.buffer.length}`);
+                console.log(`${now_at()} ${username} DEBUG ${AsciiString(user.buffer)}`);
                 break; // Wait for the next chunk of data
             }
 
@@ -265,7 +331,7 @@ function handleData(user) {
             user.buffer = user.buffer.slice(5 + packetLength);
         }
     } catch (error) {
-        console.error('Error in handleData:', error);
+        console.error(`${now_at()} ${user.serverID} Error in handleData:`, error);
         user.connection.destroy(); // Optionally terminate connection for critical errors
     }
 }
@@ -274,7 +340,7 @@ function processPacket (sByte, clientPacket, user) {
     let response = Buffer.alloc(0);
     const userID = user.getServerIDBytes();
 
-    console.log(`${user.username} IN ${sByte}: ${AsciiString(clientPacket)}`);
+    console.log(`${now_at()} ${user.username} DEBUG IN ${sByte}: ${AsciiString(clientPacket)}`);
     if (!user.logged) {
         switch (sByte) {
             case 129:
@@ -313,16 +379,14 @@ function processPacket (sByte, clientPacket, user) {
                     return;
                 }
             
-                const fixedPart = clientPacket.slice(0, 5);
-                console.log("Fixed part:", fixedPart); // For debugging
-            
                 const usernameLength = UTBL(clientPacket.slice(5, 7));
                 if (clientPacket.length < 7 + usernameLength) {
-                    console.log("Error: Packet too short to contain username.");
+                    console.log(`${now_at()} ${user.serverID} Error: Packet too short to contain username.`);
                     return;
                 }
                 const username = clientPacket.slice(7, 7 + usernameLength).toString('utf-8');
-                console.log("Username:", username); // For debugging
+                console.log(`${now_at()} ${user.serverID} Username-> ${username}`); // For debugging
+
                 // Extract the password length
                 const passwordLength = UTBL(clientPacket.slice(14 + usernameLength, 16 + usernameLength));
                 if (clientPacket.length < 10 + usernameLength + passwordLength) {
@@ -330,26 +394,58 @@ function processPacket (sByte, clientPacket, user) {
                     return;
                 }
                 const password = clientPacket.slice(16 + usernameLength, 18 + usernameLength + passwordLength).toString('utf-8');
-                console.log("Password:", password); // For debugging
-            
+                console.log(`${now_at()} ${username} Password-> ${passwordLength}`); // For debugging
+
+                if (validateUser(username, password) === false) {
+                    response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, INVALID_LOGIN_RESPONSE]);
+                    sendOut(user, response);
+                    removeUser(user);
+                    return;
+                }
+
+                checkExistingLogin = findUserByName(username);
+                if (checkExistingLogin >= 0) { 
+                    //Disconnect existing user.
+                    response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, NEW_LOGIN_RESPONSE]);
+                    sendOut(users[checkExistingLogin], response);
+                    removeUser(users[checkExistingLogin]);
+                }
+        
                 user.username = username;
                 user.password = password;
-            
-                const part1 = Buffer.from([0, 12, 0, 0, 0]);
-                const part2 = userID;
-                const part3 = TBL(user.username);
-                const part4 = Buffer.from([1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
-            
-                // Combine all parts into a single packet
-                response = Buffer.concat([part1, part2, part3, part4]);
-                sendOut(user, response);
+
+                switch (user.username) {
+                    case "registerme@buddy":
+                        //*232 You have been disconnected because you signed on again from another computer.
+                        //*233 The member name you entered is either banned or restricted from use.
+                        //*235 Incorrect login. Please try again.
+                        //*239 The network may be down. Please try again plater.
+                        //*229 For your protection you have been disconnected. Come back soon.
+                        //*226 Please register and try again
+                        //*223 You cannot yet rejoin the community after being removed for inappropriate behavior
+                        LOGIN_RESPONSE = new Uint8Array([226]);
+                        response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, LOGIN_RESPONSE]);
+                        sendOut(user, response);
+                        removeUser(user);
+                        return;
+                    default:
+                        const part1 = Buffer.from([0, 12, 0, 0, 0]);
+                        const part2 = userID;
+                        const part3 = TBL(user.username);
+                        const part4 = Buffer.from([1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
+                    
+                        // Combine all parts into a single packet
+                        response = Buffer.concat([part1, part2, part3, part4]);
+                        sendOut(user, response);
+                        break
+                }
                 break;
 
             case 132:
                 const urlLength = UTBL(clientPacket.slice(13, 15));
                 const urlBytes = clientPacket.slice(15, 15 + urlLength);
                 
-                console.log(`${urlLength} ${AsciiString(urlBytes)}`);
+                console.log(`${now_at()} ${user.username} NAVIGATE ${urlLength} ${AsciiString(urlBytes)}`);
                 
                 // Construct the first response packet
                 response = Buffer.concat([
@@ -402,7 +498,7 @@ function processPacket (sByte, clientPacket, user) {
             }
         
             tID = AsciiString(clientPacket.slice(clientPacket.length - 4));
-            console.log(`User DM: ${tID} ${messagetext}`);
+            console.log(`${now_at()} ${user.username} DM->${tID} ${messagesize}`);
         
             findBuddy = findUserByID(tID);
             if (findBuddy >= 0) { 
@@ -462,7 +558,7 @@ function processPacket (sByte, clientPacket, user) {
                 case 21:
                     tID = AsciiString(clientPacket.slice(5, 9)); // Extract tID from the packet
                     const findBuddy = findUserByID(tID); // Find the buddy by tID
-                    console.log(`User AV Request: ${user.username} -> ${users[findBuddy].username}`);
+                    console.log(`${now_at()} ${user.username} Avatar-REQUEST-> ${users[findBuddy].username}`);
 
                     
                     if (findBuddy >= 0) {  // Ensure buddy is found (index >= 0)
@@ -475,14 +571,14 @@ function processPacket (sByte, clientPacket, user) {
                         ]);
             
                         sendOut(user, response); // Send the response to the user
-                        console.log(`User AV Sent: ${users[findBuddy].username} -> ${user.username} `);
+                        console.log(`${now_at()} ${user.username} Avatar-SENT-> ${users[findBuddy].username}`);
                     }
                     break;
             
 
                 case 22:
                     avdata = clientPacket.slice(13);
-                    console.log(`User Updated Avatar: ${user.username} ${avdata.length}`);
+                    console.log(`${now_at()} ${user.username} Avatar-UPDATE-> ${avdata.length}`);
                     user.avatarData = new Uint8Array(avdata);
                     break;
             }
@@ -493,11 +589,11 @@ function processPacket (sByte, clientPacket, user) {
             switch (clientPacket[12]) {
                 case PAL_TYPE_ADD: //Add Buddy
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
-                    console.log(`User Added: ${buddyNameText.length} ${buddyNameText}`);
+                    console.log(`${now_at()} Buddylist->ADD ${buddyNameText.length} ${buddyNameText}`);
                     findBuddy = findUserByName(buddyNameText);
                     if ((findBuddy >= 0) && (users[findBuddy].status === PAL_STATUS_ONLINE)) { 
                         buddyID = users[findBuddy].getServerIDBytes();
-                        console.log(`User Online: ${AsciiString(buddyID)} ${buddyNameText}`);
+                        console.log(`${now_at()} User Online: ${AsciiString(buddyID)} ${buddyNameText}`);
 
                         user.addBuddy(users[findBuddy].username);
 
@@ -523,12 +619,12 @@ function processPacket (sByte, clientPacket, user) {
                 case PAL_TYPE_REMOVE: //Remove Buddy
                     buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
                     user.removeBuddy(buddyNameText);
-                    console.log(`User Removed: ${buddyNameText.length} ${buddyNameText}`);
+                    console.log(`${now_at()} ${user.username} Buddylist->REMOVE ${buddyNameText.length} ${buddyNameText}`);
                     break;
 
                 case PAL_TYPE_LIST: // Buddylist send
                     const friendCount = UTBL(clientPacket.slice(24, 26));
-                    console.log(`Buddylist: ${friendCount} friends`);
+                    console.log(`${now_at()} ${user.username} Buddylist: ${friendCount} friends`);
                     let buddyBegin = 26;
                     let tempPacket = Buffer.alloc(0);
                     onlineCount = 0;
@@ -541,12 +637,12 @@ function processPacket (sByte, clientPacket, user) {
                         buddyBegin += tempBuddyNameSize;
                 
                         user.addBuddy(tempBuddyName);
-                        console.log(`Buddylist: ADD ${tempBuddyName}`);
+                        console.log(`${now_at()} ${user.username} Buddylist->INIT ${tempBuddyName}`);
 
                         findBuddy = findUserByName(tempBuddyName);
                         if (findBuddy >= 0) { 
                             buddyID = users[findBuddy].getServerIDBytes();
-                            console.log(`Sending User Online for ${AsciiString(buddyID)} ${tempBuddyName} to ${AsciiString(userID)} ${user.username}`);
+                            console.log(`${now_at()} Sending User Online for ${AsciiString(buddyID)} ${tempBuddyName} to ${AsciiString(userID)} ${user.username}`);
    
                             if (users[findBuddy].status === PAL_STATUS_ONLINE) {
                                 tempPacket = Buffer.concat([tempPacket, TBL(users[findBuddy].username), buddyID]);
@@ -588,7 +684,7 @@ function processPacket (sByte, clientPacket, user) {
                         break;
                 
                 default:
-                    console.log(`Unknown type: ${clientPacket[12]}`);
+                    console.log(`${now_at()} ${user.username} Unknown type: ${clientPacket[12]}`);
                     break;
 
             }
@@ -599,7 +695,7 @@ function processPacket (sByte, clientPacket, user) {
 
 function sendOut(user, data) {
     if (!user.connection) {
-        console.error('User is not connected');
+        console.error(`${now_at()} ${user.username} is not connected`);
         return;
     }
 
@@ -610,13 +706,13 @@ function sendOut(user, data) {
     // Cycle `sByte` between 129 and 255
     user.sByte = user.sByte === 255 ? 129 : user.sByte + 1;
 
-    console.log(`${user.username} OUT: ${AsciiString(packet)}`);
+    console.log(`${now_at()} ${user.username} DEBUG OUT ${AsciiString(packet)}`);
 
     // Handle backpressure if the write buffer is full
     if (!canWrite) {
-        console.warn('Backpressure detected, waiting for drain event');
+        console.warn(`${now_at()} ${user.username} Backpressure detected, waiting for drain event`);
         user.connection.once('drain', () => {
-            console.log('Drain event triggered, resuming writes');
+            console.log(`${now_at()} ${user.username} Drain event triggered, resuming writes`);
         });
     }
 }
@@ -637,7 +733,7 @@ function TBL(theString) {
 
 function UFBL(buffer) {
     if (buffer.length !== 4) {
-        console.error("UFBL expects a 4-byte buffer.");
+        console.error(`${now_at()} UFBL expects a 4-byte buffer.`);
         return;
     }
 
@@ -650,7 +746,7 @@ function UFBL(buffer) {
 
 function UTBL(buffer) {
     if (buffer.length !== 2) {
-        console.error("UTBL expects a 2-byte buffer.");
+        console.error(`${now_at()} UTBL expects a 2-byte buffer.`);
         return;
     }
 
@@ -672,7 +768,7 @@ function fourByteLength(uintPacketSize) {
 
 function twoByteLength(uintPacketSize) {
     if (uintPacketSize > 65535) {
-        throw new RangeError("Packet length cannot exceed 65,535 bytes.");
+        throw new RangeError(`${now_at()} Packet length cannot exceed 65,535 bytes.`);
     }
 
     let chrPacketHeader = new Uint8Array(2);
@@ -685,17 +781,25 @@ function twoByteLength(uintPacketSize) {
 
 function AsciiString(byteArray) {
     if (!Array.isArray(byteArray) && !(byteArray instanceof Uint8Array)) {
-        console.error("Input must be a ByteArray or Uint8Array.");
+        console.error(`${now_at()} Input must be a ByteArray or Uint8Array.`);
         return "";
     }
 
     return Array.from(byteArray).join(' ');
 }
 
+function now_at() {
+    const now = new Date();
+    const pad = (num) => String(num).padStart(2, '0');
+
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
 //Protocol Functions
 function broadcast_status(user) {
     const usersWithBuddy = findUsersWithBuddy(user);
-    console.log(`Looking for ${user.username} buddylist users.`);
+    console.log(`${now_at()} Looking for ${user.username} buddylist users.`);
     buddyID = user.getServerIDBytes();
 
     usersWithBuddy.forEach(tempuser => {
