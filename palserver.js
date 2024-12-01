@@ -1,5 +1,5 @@
 //PAL Server
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
 //November 30, 2024
 //catielovexo@gmail.com
 
@@ -9,6 +9,7 @@ console.log('');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
+const { buffer } = require('stream/consumers');
 const http = require('http');
 const dbPath = path.join(process.cwd(), 'database.json'); 
 
@@ -319,7 +320,7 @@ function handleData(user) {
             // Check if the full packet is available in the buffer
             if (user.buffer.length < packetLength + 5) {
                 console.log(`${now_at()} ${user.username} Incomplete packet, waiting for more data, expected ${packetLength} received: ${user.buffer.length}`);
-                console.log(`${now_at()} ${username} DEBUG ${AsciiString(user.buffer)}`);
+                console.log(`${now_at()} ${user.username} DEBUG ${AsciiString(user.buffer)}`);
                 break; // Wait for the next chunk of data
             }
 
