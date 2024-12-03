@@ -1,6 +1,6 @@
 //PAL Server
-const VERSION = '0.5.0';
-//November 30, 2024
+const VERSION = '0.7.0';
+//December 2, 2024
 //catielovexo@gmail.com
 
 console.log(`Welcome to PAL Server ${VERSION}`);
@@ -145,6 +145,10 @@ const PAL_STATUS_OFFLINE = new Uint8Array([0]);
 const PAL_STATUS_AWAY = new Uint8Array([2]);
 
 const ROOM_TYPE_PRIVATE = new Uint8Array([8, 32]);
+const ROOM_TYPE_REGULAR = new Uint8Array([8, 64]);
+const ROOM_TYPE_PICKER = new Uint8Array([8, 128]);
+const ROOM_TYPE_LOBBY = new Uint8Array([8, 129]);
+const ROOM_TYPE_AUDITORIUM = new Uint8Array([8, 130]);
 
 let nextID = 5; // Start with ServerID 0x00000001
 
@@ -158,6 +162,8 @@ class User {
         this.idName = '';
         this.idLocation = '';
         this.idEmail = '';
+        this.roomURL = '';
+        this.roomName = '';
         this.status = PAL_STATUS_OFFLINE;
         this.buddyList = [];
         this.connection = connection;
@@ -388,7 +394,6 @@ function processPacket (sByte, clientPacket, user) {
                 const username = clientPacket.slice(7, 7 + usernameLength).toString('utf-8');
                 console.log(`${now_at()} ${user.serverID} Username-> ${username}`); // For debugging
 
-                // Extract the password length
                 const passwordLength = UTBL(clientPacket.slice(14 + usernameLength, 16 + usernameLength));
                 if (clientPacket.length < 10 + usernameLength + passwordLength) {
                     console.log("Error: Packet too short to contain password.");
@@ -398,7 +403,11 @@ function processPacket (sByte, clientPacket, user) {
                 console.log(`${now_at()} ${username} Password-> ${passwordLength}`); // For debugging
 
                 if (validateUser(username, password) === false) {
-                    response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, INVALID_LOGIN_RESPONSE]);
+                    response = Buffer.concat([Buffer.from([0, 14]),
+                        user.getServerIDBytes(),
+                        Buffer.from([0, 0, 0, 0]),
+                        Buffer.from(INVALID_LOGIN_RESPONSE)]);
+
                     sendOut(user, response);
                     removeUser(user);
                     return;
@@ -407,7 +416,11 @@ function processPacket (sByte, clientPacket, user) {
                 checkExistingLogin = findUserByName(username);
                 if (checkExistingLogin >= 0) { 
                     //Disconnect existing user.
-                    response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, NEW_LOGIN_RESPONSE]);
+                    response = Buffer.concat([Buffer.from([0, 14]),
+                        user.getServerIDBytes(),
+                        Buffer.from([0, 0, 0, 0]),
+                        Buffer.from(NEW_LOGIN_RESPONSE)]);
+
                     sendOut(users[checkExistingLogin], response);
                     removeUser(users[checkExistingLogin]);
                 }
@@ -415,36 +428,22 @@ function processPacket (sByte, clientPacket, user) {
                 user.username = username;
                 user.password = password;
 
-                switch (user.username) {
-                    case "registerme@buddy":
-                        //*232 You have been disconnected because you signed on again from another computer.
-                        //*233 The member name you entered is either banned or restricted from use.
-                        //*235 Incorrect login. Please try again.
-                        //*239 The network may be down. Please try again plater.
-                        //*229 For your protection you have been disconnected. Come back soon.
-                        //*226 Please register and try again
-                        //*223 You cannot yet rejoin the community after being removed for inappropriate behavior
-                        LOGIN_RESPONSE = new Uint8Array([226]);
-                        response = Buffer.from([0, 14, 0, 0, 0, 0, 0, 0, 0, 0, LOGIN_RESPONSE]);
-                        sendOut(user, response);
-                        removeUser(user);
-                        return;
-                    default:
-                        const part1 = Buffer.from([0, 12, 0, 0, 0]);
-                        const part2 = userID;
-                        const part3 = TBL(user.username);
-                        const part4 = Buffer.from([1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
-                    
-                        // Combine all parts into a single packet
-                        response = Buffer.concat([part1, part2, part3, part4]);
-                        sendOut(user, response);
-                        break
-                }
-                break;
+                const part1 = Buffer.from([0, 12, 0, 0, 0]);
+                const part2 = userID;
+                const part3 = TBL(user.username);
+                const part4 = Buffer.from([1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
+            
+                // Combine all parts into a single packet
+                response = Buffer.concat([part1, part2, part3, part4]);
+                sendOut(user, response);
+                break
 
             case 132:
                 const urlLength = UTBL(clientPacket.slice(13, 15));
                 const urlBytes = clientPacket.slice(15, 15 + urlLength);
+
+                user.roomURL = urlBytes.toString();
+                user.roomName = '';
                 
                 console.log(`${now_at()} ${user.username} NAVIGATE ${urlLength} ${AsciiString(urlBytes)}`);
                 
@@ -477,42 +476,88 @@ function processPacket (sByte, clientPacket, user) {
     } else {
         switch(clientPacket[1]) {
         case PACKET_MAIN_DM: // Handle DMs
-            let messagesize = UTBL(clientPacket.slice(7, 9)); // Extract message size
-            let messagetext = clientPacket.slice(9, 9 + messagesize); // Extract message text
+            const key = clientPacket.slice(12, 14).join(',');
 
-            let attachmentsizeStart = 9 + messagesize;
-            let attachmentsize = UFBL(clientPacket.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
+            switch (key) {
+            case '2,2':
+                console.log(`${AsciiString(clientPacket.slice(clientPacket.length - 4))}`);
+                // Outbound More Info Req.
+                const findBuddy2 = findUserByID(AsciiString(clientPacket.slice(clientPacket.length - 4)));
+                if (findBuddy2 >= 0) {
+                    const response2 = Buffer.concat([
+                        Buffer.from([0, 5, 0]),
+                        users[findBuddy2].getServerIDBytes(),
+                        Buffer.from([0, 0, 0, 0, 0, 2, 2, 0]),
+                        user.getServerIDBytes(),
+                        Buffer.from([
+                            1, 0,
+                            ...TBL(user.username),
+                            2, 0, 0, 0, 0, 0, 0
+                        ])
+                    ]);
         
-            let hasGesture = attachmentsize !== 0;
+                    sendOut(users[findBuddy2], response2);
+                }
+                return;
         
-            let gesturetext = "";
-            let sIDStart;
+            case '6,3':
+                const findBuddy6 = findUserByID(AsciiString(clientPacket.slice(clientPacket.length - 4)));
+                if (findBuddy6 >= 0) {
+                    const response6 = Buffer.concat([
+                        Buffer.from([0, 5, 0]),
+                        users[findBuddy6].getServerIDBytes(),
+                        clientPacket.slice(7, clientPacket.length - 4),
+                        user.getServerIDBytes(),
+                        Buffer.from([
+                            1, 0,
+                            ...TBL(user.username),
+                            2, 0, 0, 0, 0, 0, 0
+                        ])
+                    ]);
         
-            if (hasGesture) {
-                let gesturesizeStart = attachmentsizeStart + 5; // Gesture TBL starts after the flag
-                let gesturesize = UTBL(clientPacket.slice(gesturesizeStart, gesturesizeStart + 2));
-                gesturetext = clientPacket.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
-                sIDStart = gesturesizeStart + 2 + gesturesize; // sID starts after gesture data
-            } else {
-                // No gesture
-                sIDStart = attachmentsizeStart + 4;
-            }
-        
-            tID = AsciiString(clientPacket.slice(clientPacket.length - 4));
-            console.log(`${now_at()} ${user.username} DM->${tID} ${messagesize}`);
-        
-            findBuddy = findUserByID(tID);
-            if (findBuddy >= 0) { 
-                response = Buffer.concat([
-                    Buffer.from([0, 5, 0]),       // Fixed header
-                    users[findBuddy].getServerIDBytes(),
-                    TBL(messagetext),
-                    clientPacket.slice(attachmentsizeStart, sIDStart),
-                    userID,
-                    Buffer.from([1, 0]),
-                    TBL(user.username),
-                    Buffer.from([2, 255, 255, 255, 255, 0, 0])]);
-                sendOut(users[findBuddy], response); 
+                    sendOut(users[findBuddy6], response6);
+                }
+                return;
+
+                default:
+                let messagesize = UTBL(clientPacket.slice(7, 9)); // Extract message size
+                let messagetext = clientPacket.slice(9, 9 + messagesize); // Extract message text
+
+                let attachmentsizeStart = 9 + messagesize;
+                let attachmentsize = UFBL(clientPacket.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
+            
+                let hasGesture = attachmentsize !== 0;
+            
+                let gesturetext = "";
+                let sIDStart;
+            
+                if (hasGesture) {
+                    let gesturesizeStart = attachmentsizeStart + 5; // Gesture TBL starts after the flag
+                    let gesturesize = UTBL(clientPacket.slice(gesturesizeStart, gesturesizeStart + 2));
+                    gesturetext = clientPacket.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
+                    sIDStart = gesturesizeStart + 2 + gesturesize; // sID starts after gesture data
+                } else {
+                    // No gesture
+                    sIDStart = attachmentsizeStart + 4;
+                }
+            
+                tID = AsciiString(clientPacket.slice(clientPacket.length - 4));
+                console.log(`${now_at()} ${user.username} DM->${tID} ${messagesize}`);
+            
+                findBuddy = findUserByID(tID);
+                if (findBuddy >= 0) { 
+                    response = Buffer.concat([
+                        Buffer.from([0, 5, 0]),       // Fixed header
+                        users[findBuddy].getServerIDBytes(),
+                        TBL(messagetext),
+                        clientPacket.slice(attachmentsizeStart, sIDStart),
+                        userID,
+                        Buffer.from([1, 0]),
+                        TBL(user.username),
+                        Buffer.from([2, 255, 255, 255, 255, 0, 0])]);
+                    sendOut(users[findBuddy], response); 
+                    }
+                break;
                 }
             break;
 
@@ -535,8 +580,9 @@ function processPacket (sByte, clientPacket, user) {
                     TBL(result.idLocation),
                     TBL(result.idEmail),
                     FAKE_USER_IP,
-                    Buffer.from([0, 0, 0, 0]), //TBL ROOMURL, TBL ROOMNAME
-                    ROOM_TYPE_PRIVATE,
+                    TBL(result.roomURL),
+                    TBL(result.roomName),
+                    ROOM_TYPE_LOBBY,
                     Buffer.from([0, 0, 0, 0, 0, 0, 4, 1, 1, 0, 0])
                 ]);
             }
@@ -671,14 +717,17 @@ function processPacket (sByte, clientPacket, user) {
                 
                 case 86:
                         switch (clientPacket[19]) {
-                            case Buffer.from(PAL_STATUS_ONLINE):
+                            case 1:
                                 user.status = PAL_STATUS_ONLINE;
                                 break;
-                            case Buffer.from(PAL_STATUS_OFFLINE):
+                            case 0:
                                 user.status = PAL_STATUS_OFFLINE;
                                 break;
-                            case Buffer.from(PAL_STATUS_AWAY):
+                            case 2:
                                 user.status = PAL_STATUS_AWAY;
+                                break;
+                            default:
+                                console.log(`${now_at()} ${user.username} Unknown type: ${clientPacket[19]}`)
                                 break;
                         }
                         broadcast_status(user);

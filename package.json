@@ -1,6 +1,6 @@
 {
   "name": "palserver",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "main": "palserver.js",
   "bin": "palserver.js",
   "pkg": {
