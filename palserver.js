@@ -1,7 +1,8 @@
-//PAL Server
-const VERSION = '0.7.0';
-//December 2, 2024
-//catielovexo@gmail.com
+// main.js
+// PAL Server
+const VERSION = '0.8.0';
+// December 12, 2024
+// catielovexo@gmail.com
 
 console.log(`Welcome to PAL Server ${VERSION}`);
 console.log('');
@@ -9,9 +10,32 @@ console.log('');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
-const { buffer } = require('stream/consumers');
 const http = require('http');
-const dbPath = path.join(process.cwd(), 'database.json'); 
+const Room = require('./room');
+const User = require('./user');
+const { sendOut } = require('./protocol');
+const { now_at, AsciiString, FBL, TBL, UFBL, UTBL, twoByteLength, fourByteLength } = require('./utils');
+const { assignServerID } = require('./idGenerator');
+const { 
+    PAL_BOT_ID, 
+    VPUSERSERVICE_BOT_ID, 
+    PAL_STATUS_ONLINE, 
+    PAL_STATUS_OFFLINE, 
+    PAL_STATUS_AWAY, 
+    FAKE_USER_IP, 
+    ROOM_TYPE_LOBBY,
+    SERVER_BOT_ID,
+    SERVER_BOT_TYPE
+} = require('./constants');
+
+// Import handler modules
+const dmHandler = require('./handlers/dmHandler');
+const locateHandler = require('./handlers/locateHandler');
+const buddyHandler = require('./handlers/buddyHandler');
+const roomHandler = require('./handlers/roomHandler');
+
+const rooms = new Map(); // Key: roomURL, Value: Room instance
+const dbPath = path.join(process.cwd(), 'database.json');
 
 // Initialize or load the database
 let db = { users: [] };
@@ -110,19 +134,18 @@ httpServer.listen(8080, () => {
     console.log(`${now_at()} HTTP API Gateway listening on port 8080`);
 });
 
-const FAKE_USER_IP = new Uint8Array([255, 255, 255, 255]);
-
-const SERVER_PARAM_COUNT = new Uint8Array([0, 3]); //3 Params required for minimum PAL Compatibility
-const SERVER_PARAM = new Uint8Array([3, 251]);
+// Protocol Constants (moved to constants.js)
+const SERVER_PARAM_COUNT = Buffer.from([0, 3]); // 3 Params required for minimum PAL Compatibility
+const SERVER_PARAM = Buffer.from([3, 251]);
 const SERVER_TITLE = TBL('palserver');
-const SERVER_TITLE_PARAM = new Uint8Array([3, 232]);
+const SERVER_TITLE_PARAM = Buffer.from([3, 232]);
 const REGISTRATION_PAGE = TBL('http://pal.nenya.dev:81/');
-const REGISTRATION_PAGE_PARAM = new Uint8Array([3, 233]);
+const REGISTRATION_PAGE_PARAM = Buffer.from([3, 233]);
 
-const NEW_LOGIN_RESPONSE = new Uint8Array([223]);
-const INVALID_LOGIN_RESPONSE = new Uint8Array([235]);
+const NEW_LOGIN_RESPONSE = Buffer.from([223]);
+const INVALID_LOGIN_RESPONSE = Buffer.from([235]);
 
-const PAL_USER_TYPE = new Uint8Array([2]);
+const PAL_USER_TYPE = Buffer.from([2]);
 
 const PACKET_MAIN_DM = 5;
 const PACKET_MAIN_LOCATE = 10;
@@ -132,74 +155,14 @@ const PAL_TYPE_ADD = 65;
 const PAL_TYPE_REMOVE = 82;
 const PAL_TYPE_LIST = 83;
 
-const SERVER_BOT_COUNT = new Uint8Array([0, 3]); //3 Bots required for minimum PAL Compatibility
-const FAKE_BOT_IP = new Uint8Array([255, 255, 255, 255]);
-const PAL_BOT_ID = new Uint8Array([0, 0, 0, 2]);
-const SERVER_BOT_ID = new Uint8Array([0, 0, 0, 0]);
-const SERVER_BOT_TYPE = new Uint8Array([1, 32]);
-const VPUSERSERVICE_BOT_ID = new Uint8Array([0, 0, 0, 1]);
-const VPUSERSERVICE_BOT_TYPE = new Uint8Array([1, 33]);
-const PAL_BOT_TYPE = new Uint8Array([1, 71]);
-const PAL_STATUS_ONLINE = new Uint8Array([1]);
-const PAL_STATUS_OFFLINE = new Uint8Array([0]);
-const PAL_STATUS_AWAY = new Uint8Array([2]);
+const SERVER_BOT_COUNT = Buffer.from([0, 3]); // 3 Bots required for minimum PAL Compatibility
+const VPUSERSERVICE_BOT_TYPE = Buffer.from([1, 33]);
+const PAL_BOT_TYPE = Buffer.from([1, 71]);
 
-const ROOM_TYPE_PRIVATE = new Uint8Array([8, 32]);
-const ROOM_TYPE_REGULAR = new Uint8Array([8, 64]);
-const ROOM_TYPE_PICKER = new Uint8Array([8, 128]);
-const ROOM_TYPE_LOBBY = new Uint8Array([8, 129]);
-const ROOM_TYPE_AUDITORIUM = new Uint8Array([8, 130]);
-
-let nextID = 5; // Start with ServerID 0x00000001
-
-class User {
-    constructor(connection, ip) {
-        this.serverID = assignServerID();
-        this.logged = false;
-        this.username = '';
-        this.password = '';
-        this.avatarData = Buffer.alloc(0);
-        this.idName = '';
-        this.idLocation = '';
-        this.idEmail = '';
-        this.roomURL = '';
-        this.roomName = '';
-        this.status = PAL_STATUS_OFFLINE;
-        this.buddyList = [];
-        this.connection = connection;
-        this.sByte = 129;
-        this.ip = ip;
-        this.buffer = Buffer.alloc(0);
-    }
-
-        // Add a buddy to the buddy list
-        addBuddy(buddy) {
-            if (!this.buddyList.includes(buddy)) {
-                this.buddyList.push(buddy);
-            } else {
-                console.log(`${now_at()} ${this.username} Buddy ${buddy} is already listed.`);
-            }
-        }
-    
-        // Remove a buddy from the buddy list
-        removeBuddy(buddy) {
-            const index = this.buddyList.indexOf(buddy);
-            if (index !== -1) {
-                this.buddyList.splice(index, 1);
-            } else {
-                console.log(`${now_at()} ${this.username }Buddy ${buddy} not found in the list.`);
-            }
-        }
-
-    getServerIDBytes() {
-        const buffer = Buffer.alloc(4);
-        buffer.writeUInt32BE(this.serverID);
-        return buffer;
-    }
-}
-
-const assignServerID = () => nextID++;
+// Function to add a user to the users array
 const addUser = (user) => users.push(user);
+
+// Function to remove a user from the users array and all rooms
 const removeUser = (user) => {
     user.connection.destroy();
     const index = users.findIndex(u => u.serverID === user.serverID);
@@ -207,8 +170,19 @@ const removeUser = (user) => {
         users.splice(index, 1);
         console.log(`${now_at()} ${user.serverID} User removed.`);
     }
+
+    // Remove user from all rooms
+    user.rooms.forEach(room => {
+        room.removeUser(user);
+        // Optionally, delete the room if it's empty
+        if (room.currentSize === 0) {
+            rooms.delete(room.roomURL);
+            console.log(`${now_at()} Deleted empty room: ${room.roomTitle}`);
+        }
+    });
 };
 
+// Function to find users with a specific buddy
 function findUsersWithBuddy(buddy) {
     const usersWithBuddy = [];
 
@@ -223,10 +197,12 @@ function findUsersWithBuddy(buddy) {
     return usersWithBuddy;
 }
 
+// Function to find user index by name
 function findUserByName(username) {
     return users.findIndex(u => u.username.toLowerCase() === username.toString().toLowerCase());
 }
 
+// Function to find users by search string
 function findUsersByString(searchString) {
     if (!searchString) return []; // Return an empty array for invalid input
     return users.filter(u =>
@@ -234,10 +210,12 @@ function findUsersByString(searchString) {
     );
 }
 
+// Function to find user index by ID
 function findUserByID(ID) {
     return users.findIndex(u => AsciiString(u.getServerIDBytes()) === ID);
 }
 
+// Function to convert IP to bytes
 const ipToBytes = (ip) => {
     console.log("Input IP:", ip);
 
@@ -255,6 +233,60 @@ const ipToBytes = (ip) => {
 
     return Buffer.from(parts);
 };
+
+// Function to join a room
+function joinRoom(user, roomURL, roomTitle, maxSize = 100) {
+    let room;
+    if (rooms.has(roomURL)) {
+        room = rooms.get(roomURL);
+        if (!room.addUser(user)) {
+            console.log(`${now_at()} ${user.username} could not join room ${room.roomTitle} as it is full.`);
+            return false;
+        }
+    } else {
+        room = new Room(roomURL, roomTitle, maxSize);
+        room.addUser(user);
+        rooms.set(roomURL, room);
+        console.log(`${now_at()} Created and joined new room: ${room.roomTitle} with URL: ${roomURL}`);
+    }
+    user.rooms.add(room);
+    return true;
+}
+
+// Function to leave a room
+function leaveRoom(user, roomURL) {
+    if (rooms.has(roomURL)) {
+        const room = rooms.get(roomURL);
+        room.removeUser(user);
+        user.rooms.delete(room);
+        if (room.currentSize === 0) {
+            rooms.delete(roomURL);
+            console.log(`${now_at()} Deleted empty room: ${room.roomTitle}`);
+        }
+    } else {
+        console.log(`${now_at()} ${user.username} tried to leave non-existent room with URL: ${roomURL}`);
+    }
+}
+
+// Function to broadcast data to a specific room
+function broadcastToRoom(roomURL, data) {
+    const room = rooms.get(roomURL);
+    if (room) {
+        room.broadcast(data);
+        console.log(`${now_at()} Broadcasted data to room ${room.roomTitle}.`);
+    } else {
+        console.log(`${now_at()} Room with URL ${roomURL} does not exist.`);
+    }
+}
+
+// Function to get all users in a specific room
+function getUsersInRoom(roomURL) {
+    const room = rooms.get(roomURL);
+    if (room) {
+        return room.getUserList();
+    }
+    return [];
+}
 
 const startServer = async () => {
     try {
@@ -286,7 +318,6 @@ const handleConnection = (socket) => {
             removeUser(user);
         }
     });
-    
 
     socket.on('close', () => {
         console.log(`${now_at()} ${user.serverID} User disconnected`);
@@ -303,7 +334,7 @@ function appendBuffer(user, data) {
         user.buffer = Buffer.concat([user.buffer, data]); // Append new data
         handleData(user); // Process any complete packets
     } catch (error) {
-        console.error(`${now_at()} ${username} Error in appendBuffer-> ${error}`);
+        console.error(`${now_at()} ${user.username} Error in appendBuffer-> ${error}`);
     }
 }
 
@@ -332,7 +363,7 @@ function handleData(user) {
 
             // Extract and process the complete packet
             const packetData = user.buffer.slice(5, 5 + packetLength);
-            processPacket(user.buffer[0], packetData, user); // Your packet processing logic
+            processPacket(user.buffer[0], packetData, user, users, findUserByID, sendOut); // Pass necessary functions and data
 
             // Remove processed packet from the buffer
             user.buffer = user.buffer.slice(5 + packetLength);
@@ -343,7 +374,32 @@ function handleData(user) {
     }
 }
 
-function processPacket (sByte, clientPacket, user) {
+function broadcast_status(user) {
+    const usersWithBuddy = findUsersWithBuddy(user);
+    console.log(`${now_at()} Looking for ${user.username} buddylist users.`);
+    const buddyID = user.getServerIDBytes();
+
+    usersWithBuddy.forEach(tempuser => {
+        console.log(`Sending update for ${user.username} to ${tempuser.username}`);
+
+        const tempUserID = tempuser.getServerIDBytes();
+        const response = Buffer.concat([
+            Buffer.from([0, 29, 0]),       // Fixed header
+            tempUserID,                    // User ID (Buffer)
+            Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
+            TBL(Buffer.concat([
+                user.status, 
+                TBL(user.username),
+                buddyID
+            ])),
+            PAL_BOT_ID
+        ]);
+        sendOut(tempuser, response); 
+    });
+}
+
+
+function processPacket(sByte, clientPacket, user, users, findUserByID, sendOutFunc) {
     let response = Buffer.alloc(0);
     const userID = user.getServerIDBytes();
 
@@ -351,33 +407,33 @@ function processPacket (sByte, clientPacket, user) {
     if (!user.logged) {
         switch (sByte) {
             case 129:
-            response = Buffer.concat([
+                response = Buffer.concat([
                     Buffer.from([0, 0, 0, 0, 3, 0, 1]),
-                    Buffer.from(SERVER_BOT_COUNT),
-                    Buffer.from(SERVER_BOT_ID),
-                    Buffer.from(SERVER_BOT_TYPE),
+                    SERVER_BOT_COUNT,
+                    SERVER_BOT_ID,
+                    SERVER_BOT_TYPE,
                     Buffer.from([0, 0, 0, 7]),
-                    Buffer.from(FAKE_BOT_IP),
-                    Buffer.from(VPUSERSERVICE_BOT_ID),
-                    Buffer.from(VPUSERSERVICE_BOT_TYPE),
+                    FAKE_USER_IP,
+                    VPUSERSERVICE_BOT_ID,
+                    VPUSERSERVICE_BOT_TYPE,
                     Buffer.from([0, 0, 0, 1]),
-                    Buffer.from(FAKE_BOT_IP),
-                    Buffer.from(PAL_BOT_ID),
-                    Buffer.from(PAL_BOT_TYPE),
+                    FAKE_USER_IP,
+                    PAL_BOT_ID,
+                    PAL_BOT_TYPE,
                     Buffer.from([0, 0, 0, 0]),
-                    Buffer.from(FAKE_BOT_IP),
-                    Buffer.from(SERVER_PARAM_COUNT),
+                    FAKE_USER_IP,
+                    SERVER_PARAM_COUNT,
                     Buffer.from([5]),
-                    Buffer.from(SERVER_PARAM),
+                    SERVER_PARAM,
                     Buffer.from([0, 0]),
-                    Buffer.from(SERVER_TITLE_PARAM),
-                    SERVER_TITLE, 
+                    SERVER_TITLE_PARAM,
+                    SERVER_TITLE,
                     Buffer.from([0]),
-                    Buffer.from(REGISTRATION_PAGE_PARAM),
+                    REGISTRATION_PAGE_PARAM,
                     REGISTRATION_PAGE,
                     Buffer.from([0, 0, 0, 0]),
                 ]);
-                sendOut(user, response);
+                sendOutFunc(user, response);
                 break;
 
             case 130:
@@ -385,7 +441,7 @@ function processPacket (sByte, clientPacket, user) {
                     console.log("Error: Packet too short to contain valid data.");
                     return;
                 }
-            
+
                 const usernameLength = UTBL(clientPacket.slice(5, 7));
                 if (clientPacket.length < 7 + usernameLength) {
                     console.log(`${now_at()} ${user.serverID} Error: Packet too short to contain username.`);
@@ -403,28 +459,32 @@ function processPacket (sByte, clientPacket, user) {
                 console.log(`${now_at()} ${username} Password-> ${passwordLength}`); // For debugging
 
                 if (validateUser(username, password) === false) {
-                    response = Buffer.concat([Buffer.from([0, 14]),
+                    response = Buffer.concat([
+                        Buffer.from([0, 14]),
                         user.getServerIDBytes(),
                         Buffer.from([0, 0, 0, 0]),
-                        Buffer.from(INVALID_LOGIN_RESPONSE)]);
+                        INVALID_LOGIN_RESPONSE
+                    ]);
 
-                    sendOut(user, response);
+                    sendOutFunc(user, response);
                     removeUser(user);
                     return;
                 }
 
-                checkExistingLogin = findUserByName(username);
+                const checkExistingLogin = findUserByName(username);
                 if (checkExistingLogin >= 0) { 
-                    //Disconnect existing user.
-                    response = Buffer.concat([Buffer.from([0, 14]),
+                    // Disconnect existing user.
+                    response = Buffer.concat([
+                        Buffer.from([0, 14]),
                         user.getServerIDBytes(),
                         Buffer.from([0, 0, 0, 0]),
-                        Buffer.from(NEW_LOGIN_RESPONSE)]);
+                        NEW_LOGIN_RESPONSE
+                    ]);
 
-                    sendOut(users[checkExistingLogin], response);
+                    sendOutFunc(users[checkExistingLogin], response);
                     removeUser(users[checkExistingLogin]);
                 }
-        
+
                 user.username = username;
                 user.password = password;
 
@@ -432,21 +492,40 @@ function processPacket (sByte, clientPacket, user) {
                 const part2 = userID;
                 const part3 = TBL(user.username);
                 const part4 = Buffer.from([1, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
-            
+
                 // Combine all parts into a single packet
                 response = Buffer.concat([part1, part2, part3, part4]);
-                sendOut(user, response);
-                break
+                sendOutFunc(user, response);
+                break;
 
             case 132:
                 const urlLength = UTBL(clientPacket.slice(13, 15));
                 const urlBytes = clientPacket.slice(15, 15 + urlLength);
+                const roomURL = urlBytes.toString();
+                const roomTitle = `Room for ${roomURL}`; // Customize as needed
 
-                user.roomURL = urlBytes.toString();
-                user.roomName = '';
-                
-                console.log(`${now_at()} ${user.username} NAVIGATE ${urlLength} ${AsciiString(urlBytes)}`);
-                
+                console.log(`${now_at()} ${user.username} NAVIGATE ${urlLength} ${roomURL}`);
+
+                let room;
+                if (rooms.has(roomURL)) {
+                    room = rooms.get(roomURL);
+                    // Check if room is full
+                    if (!room.addUser(user)) {
+                        // Optionally, send a response to the user that the room is full
+                        console.log(`${now_at()} ${user.username} could not join room ${room.roomTitle} as it is full.`);
+                        // You might want to disconnect the user or send an error packet
+                        return;
+                    }
+                } else {
+                    // Create a new room
+                    room = new Room(roomURL, roomTitle, 100); // Set desired max size
+                    room.addUser(user);
+                    rooms.set(roomURL, room);
+                    console.log(`${now_at()} Created and joined new room: ${room.roomTitle} with URL: ${roomURL}`);
+                }
+
+                user.rooms.add(room);
+
                 // Construct the first response packet
                 response = Buffer.concat([
                     Buffer.from([0, 15, 0, 0, 1]), // Fixed header
@@ -457,16 +536,17 @@ function processPacket (sByte, clientPacket, user) {
                         1, 1, 0, 0, 0, 40, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     ]),
                 ]);
-                sendOut(user, response);
-                
+                sendOutFunc(user, response);
+
                 // Construct the second response packet
                 response = Buffer.concat([
                     Buffer.from([0, 29, 0]),       // Fixed header
                     userID,                        // User ID (Buffer)
                     Buffer.from([0, 0, 10, 114, 0, 104, 0, 0, 0, 0, 0, 0]),
-                    Buffer.from(PAL_BOT_ID)]);
-                sendOut(user, response);
-                
+                    PAL_BOT_ID
+                ]);
+                sendOutFunc(user, response);
+
                 user.logged = true;
                 user.status = PAL_STATUS_ONLINE;
 
@@ -475,401 +555,29 @@ function processPacket (sByte, clientPacket, user) {
         }
     } else {
         switch(clientPacket[1]) {
-        case PACKET_MAIN_DM: // Handle DMs
-            const key = clientPacket.slice(12, 14).join(',');
-
-            switch (key) {
-            case '2,2':
-                console.log(`${AsciiString(clientPacket.slice(clientPacket.length - 4))}`);
-                // Outbound More Info Req.
-                const findBuddy2 = findUserByID(AsciiString(clientPacket.slice(clientPacket.length - 4)));
-                if (findBuddy2 >= 0) {
-                    const response2 = Buffer.concat([
-                        Buffer.from([0, 5, 0]),
-                        users[findBuddy2].getServerIDBytes(),
-                        Buffer.from([0, 0, 0, 0, 0, 2, 2, 0]),
-                        user.getServerIDBytes(),
-                        Buffer.from([
-                            1, 0,
-                            ...TBL(user.username),
-                            2, 0, 0, 0, 0, 0, 0
-                        ])
-                    ]);
-        
-                    sendOut(users[findBuddy2], response2);
-                }
-                return;
-        
-            case '6,3':
-                const findBuddy6 = findUserByID(AsciiString(clientPacket.slice(clientPacket.length - 4)));
-                if (findBuddy6 >= 0) {
-                    const response6 = Buffer.concat([
-                        Buffer.from([0, 5, 0]),
-                        users[findBuddy6].getServerIDBytes(),
-                        clientPacket.slice(7, clientPacket.length - 4),
-                        user.getServerIDBytes(),
-                        Buffer.from([
-                            1, 0,
-                            ...TBL(user.username),
-                            2, 0, 0, 0, 0, 0, 0
-                        ])
-                    ]);
-        
-                    sendOut(users[findBuddy6], response6);
-                }
-                return;
-
-                default:
-                let messagesize = UTBL(clientPacket.slice(7, 9)); // Extract message size
-                let messagetext = clientPacket.slice(9, 9 + messagesize); // Extract message text
-
-                let attachmentsizeStart = 9 + messagesize;
-                let attachmentsize = UFBL(clientPacket.slice(attachmentsizeStart, attachmentsizeStart + 4)); // Extract attachment size    
-            
-                let hasGesture = attachmentsize !== 0;
-            
-                let gesturetext = "";
-                let sIDStart;
-            
-                if (hasGesture) {
-                    let gesturesizeStart = attachmentsizeStart + 5; // Gesture TBL starts after the flag
-                    let gesturesize = UTBL(clientPacket.slice(gesturesizeStart, gesturesizeStart + 2));
-                    gesturetext = clientPacket.slice(gesturesizeStart + 2, gesturesizeStart + 2 + gesturesize);
-                    sIDStart = gesturesizeStart + 2 + gesturesize; // sID starts after gesture data
-                } else {
-                    // No gesture
-                    sIDStart = attachmentsizeStart + 4;
-                }
-            
-                tID = AsciiString(clientPacket.slice(clientPacket.length - 4));
-                console.log(`${now_at()} ${user.username} DM->${tID} ${messagesize}`);
-            
-                findBuddy = findUserByID(tID);
-                if (findBuddy >= 0) { 
-                    response = Buffer.concat([
-                        Buffer.from([0, 5, 0]),       // Fixed header
-                        users[findBuddy].getServerIDBytes(),
-                        TBL(messagetext),
-                        clientPacket.slice(attachmentsizeStart, sIDStart),
-                        userID,
-                        Buffer.from([1, 0]),
-                        TBL(user.username),
-                        Buffer.from([2, 255, 255, 255, 255, 0, 0])]);
-                    sendOut(users[findBuddy], response); 
-                    }
+            case PACKET_MAIN_DM: // Handle DMs
+                dmHandler.handleDM(clientPacket, user, users, findUserByID, sendOut);
                 break;
-                }
-            break;
 
-        case PACKET_MAIN_LOCATE:
-            searchTextSize = UTBL(clientPacket.slice(15, 17));
-            searchTextData = Buffer.from(clientPacket.slice(17, 17 + searchTextSize), 'ascii');
-            locate_results = findUsersByString(searchTextData);
-            returnsize = twoByteLength(locate_results.length);
-            
-            let results = Buffer.alloc(0);
-            
-            for (const result of locate_results) {
-                results = Buffer.concat([
-                    results,
-                    result.getServerIDBytes(),
-                    Buffer.from([1, 0, 1]),
-                    TBL(result.username),
-                    PAL_USER_TYPE,
-                    TBL(result.idName),
-                    TBL(result.idLocation),
-                    TBL(result.idEmail),
-                    FAKE_USER_IP,
-                    TBL(result.roomURL),
-                    TBL(result.roomName),
-                    ROOM_TYPE_LOBBY,
-                    Buffer.from([0, 0, 0, 0, 0, 0, 4, 1, 1, 0, 0])
-                ]);
-            }
-            
-            response = Buffer.concat([
-                Buffer.from([0, 10, 0]),
-                user.getServerIDBytes(),
-                Buffer.from([0, 0, 0, 1]),
-                TBL(searchTextData),
-                Buffer.from([0, 0]),
-                returnsize,
-                results
-            ]);
+            case PACKET_MAIN_LOCATE:
+                locateHandler.handleLocate(clientPacket, user, users);
+                break;
 
-            sendOut(user, response);            
-            break;
-        
-        case PACKET_MAIN_ROOM:
-            switch (clientPacket[10]) {
-                case 21:
-                    tID = AsciiString(clientPacket.slice(5, 9)); // Extract tID from the packet
-                    const findBuddy = findUserByID(tID); // Find the buddy by tID
-                    console.log(`${now_at()} ${user.username} Avatar-REQUEST-> ${users[findBuddy].username}`);
+            case PACKET_MAIN_BUDDY:
+                buddyHandler.handleBuddy(clientPacket, user, users, findUserByName, sendOut);
+                break;
 
-                    
-                    if (findBuddy >= 0) {  // Ensure buddy is found (index >= 0)
-            
-                        response = Buffer.concat([
-                            Buffer.from([0, 15, 0, 0, 1]),  // Fixed header
-                            clientPacket.slice(5, 9),
-                            Buffer.from([0, 21, 1, 1]),     // Packet flags or additional data
-                            Buffer.from(users[findBuddy].avatarData)
-                        ]);
-            
-                        sendOut(user, response); // Send the response to the user
-                        console.log(`${now_at()} ${user.username} Avatar-SENT-> ${users[findBuddy].username}`);
-                    }
-                    break;
-            
+            case PACKET_MAIN_ROOM:
+                roomHandler.handleRoom(clientPacket, user, rooms, sendOut, users, findUserByID);
+                break;
 
-                case 22:
-                    avdata = clientPacket.slice(13);
-                    console.log(`${now_at()} ${user.username} Avatar-UPDATE-> ${avdata.length}`);
-                    user.avatarData = new Uint8Array(avdata);
-                    break;
-            }
-
-            break;
-
-        case PACKET_MAIN_BUDDY: //PAL Functions
-            switch (clientPacket[12]) {
-                case PAL_TYPE_ADD: //Add Buddy
-                    buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
-                    console.log(`${now_at()} Buddylist->ADD ${buddyNameText.length} ${buddyNameText}`);
-                    findBuddy = findUserByName(buddyNameText);
-                    if ((findBuddy >= 0) && (users[findBuddy].status === PAL_STATUS_ONLINE)) { 
-                        buddyID = users[findBuddy].getServerIDBytes();
-                        console.log(`${now_at()} User Online: ${AsciiString(buddyID)} ${buddyNameText}`);
-
-                        user.addBuddy(users[findBuddy].username);
-
-                        if (users[findBuddy].status = PAL_STATUS_ONLINE) {
-                            response = Buffer.concat([
-                                Buffer.from([0, 29, 0]),       // Fixed header
-                                userID,                        // User ID (Buffer)
-                                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
-                                Buffer.concat([
-                                    TBL(Buffer.concat([
-                                        Buffer.from(users[findBuddy].status, 'ascii'), 
-                                        TBL(Buffer.from(users[findBuddy].username, 'ascii')),
-                                        buddyID
-                                    ]))
-                                ]),
-                                Buffer.from(PAL_BOT_ID)]);
-                            sendOut(user, response); 
-                        }
-                    }
-
-                    break;
-
-                case PAL_TYPE_REMOVE: //Remove Buddy
-                    buddyNameText = clientPacket.slice(21, clientPacket.length - 4);
-                    user.removeBuddy(buddyNameText);
-                    console.log(`${now_at()} ${user.username} Buddylist->REMOVE ${buddyNameText.length} ${buddyNameText}`);
-                    break;
-
-                case PAL_TYPE_LIST: // Buddylist send
-                    const friendCount = UTBL(clientPacket.slice(24, 26));
-                    console.log(`${now_at()} ${user.username} Buddylist: ${friendCount} friends`);
-                    let buddyBegin = 26;
-                    let tempPacket = Buffer.alloc(0);
-                    onlineCount = 0;
-                
-                    for (let i = 0; i < friendCount; i++) {
-                        const tempBuddyNameSize = UTBL(clientPacket.slice(buddyBegin, buddyBegin + 2));
-                        buddyBegin += 2;
-                
-                        const tempBuddyName = clientPacket.slice(buddyBegin, buddyBegin + tempBuddyNameSize).toString('utf-8');
-                        buddyBegin += tempBuddyNameSize;
-                
-                        user.addBuddy(tempBuddyName);
-                        console.log(`${now_at()} ${user.username} Buddylist->INIT ${tempBuddyName}`);
-
-                        findBuddy = findUserByName(tempBuddyName);
-                        if (findBuddy >= 0) { 
-                            buddyID = users[findBuddy].getServerIDBytes();
-                            console.log(`${now_at()} Sending User Online for ${AsciiString(buddyID)} ${tempBuddyName} to ${AsciiString(userID)} ${user.username}`);
-   
-                            if (users[findBuddy].status === PAL_STATUS_ONLINE) {
-                                tempPacket = Buffer.concat([tempPacket, TBL(users[findBuddy].username), buddyID]);
-                                onlineCount++;
-                            }
-                        }
-                    }
-                    response = Buffer.concat([
-                        Buffer.from([0, 29, 0]),       // Fixed header
-                        userID,                        // User ID (Buffer)
-                        Buffer.from(VPUSERSERVICE_BOT_ID),
-                        Buffer.from([48, 117, 0, 0]),
-                        Buffer.from(
-                            FBL(
-                                Buffer.concat([
-                                    twoByteLength(onlineCount), // Online count as a 2-byte buffer
-                                    tempPacket,
-                                    Buffer.from([0, 0]),
-                                ])
-                            )
-                        ),
-                        Buffer.from(PAL_BOT_ID)]);
-                    sendOut(user, response); 
-                    break;
-                
-                case 86:
-                        switch (clientPacket[19]) {
-                            case 1:
-                                user.status = PAL_STATUS_ONLINE;
-                                break;
-                            case 0:
-                                user.status = PAL_STATUS_OFFLINE;
-                                break;
-                            case 2:
-                                user.status = PAL_STATUS_AWAY;
-                                break;
-                            default:
-                                console.log(`${now_at()} ${user.username} Unknown type: ${clientPacket[19]}`)
-                                break;
-                        }
-                        broadcast_status(user);
-                        break;
-                
-                default:
-                    console.log(`${now_at()} ${user.username} Unknown type: ${clientPacket[12]}`);
-                    break;
-
-            }
-            break;
+            default:
+                console.log(`${now_at()} Unknown packet type: ${clientPacket[1]}`);
+                break;
         }
     }
-};
-
-function sendOut(user, data) {
-    if (!user.connection) {
-        console.error(`${now_at()} ${user.username} is not connected`);
-        return;
-    }
-
-    // Prepare the packet
-    const packet = Buffer.concat([Buffer.from([user.sByte]), FBL(data)]);
-    const canWrite = user.connection.write(packet);
-
-    // Cycle `sByte` between 129 and 255
-    user.sByte = user.sByte === 255 ? 129 : user.sByte + 1;
-
-    console.log(`${now_at()} ${user.username} DEBUG OUT ${AsciiString(packet)}`);
-
-    // Handle backpressure if the write buffer is full
-    if (!canWrite) {
-        console.warn(`${now_at()} ${user.username} Backpressure detected, waiting for drain event`);
-        user.connection.once('drain', () => {
-            console.log(`${now_at()} ${user.username} Drain event triggered, resuming writes`);
-        });
-    }
-}
-
-function FBL(theString) {
-    const lengthBuffer = Buffer.from(fourByteLength(theString.length));
-    const stringBuffer = Buffer.from(theString, 'ascii');
-
-    return Buffer.concat([lengthBuffer, stringBuffer]);
-}
-
-function TBL(theString) {
-    const lengthBuffer = Buffer.from(twoByteLength(theString.length));
-    const stringBuffer = Buffer.from(theString, 'ascii');
-
-    return Buffer.concat([lengthBuffer, stringBuffer]);
-}
-
-function UFBL(buffer) {
-    if (buffer.length !== 4) {
-        console.error(`${now_at()} UFBL expects a 4-byte buffer.`);
-        return;
-    }
-
-    let a = buffer[0] * (256 ** 3);
-    let b = buffer[1] * (256 ** 2);
-    let c = buffer[2] * 256;
-    let d = buffer[3];
-    return a + b + c + d;
-}
-
-function UTBL(buffer) {
-    if (buffer.length !== 2) {
-        console.error(`${now_at()} UTBL expects a 2-byte buffer.`);
-        return;
-    }
-
-    const a = buffer[0] * 256;
-    const b = buffer[1];
-    return a + b;
-}
-
-function fourByteLength(uintPacketSize) {
-    let chrPacketHeader = new Uint8Array(4);
-
-    chrPacketHeader[0] = (uintPacketSize >> 24) & 0xFF; // Calculate the highest byte
-    chrPacketHeader[1] = (uintPacketSize >> 16) & 0xFF; // Calculate the second highest byte
-    chrPacketHeader[2] = (uintPacketSize >> 8) & 0xFF;  // Calculate the second lowest byte
-    chrPacketHeader[3] = uintPacketSize & 0xFF;         // Calculate the lowest byte
-
-    return chrPacketHeader;
-}
-
-function twoByteLength(uintPacketSize) {
-    if (uintPacketSize > 65535) {
-        throw new RangeError(`${now_at()} Packet length cannot exceed 65,535 bytes.`);
-    }
-
-    let chrPacketHeader = new Uint8Array(2);
-
-    chrPacketHeader[0] = (uintPacketSize >> 8) & 0xFF; // Calculate the high byte
-    chrPacketHeader[1] = uintPacketSize & 0xFF;        // Calculate the low byte
-
-    return chrPacketHeader;
-}
-
-function AsciiString(byteArray) {
-    if (!Array.isArray(byteArray) && !(byteArray instanceof Uint8Array)) {
-        console.error(`${now_at()} Input must be a ByteArray or Uint8Array.`);
-        return "";
-    }
-
-    return Array.from(byteArray).join(' ');
-}
-
-function now_at() {
-    const now = new Date();
-    const pad = (num) => String(num).padStart(2, '0');
-
-    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-}
-
-//Protocol Functions
-function broadcast_status(user) {
-    const usersWithBuddy = findUsersWithBuddy(user);
-    console.log(`${now_at()} Looking for ${user.username} buddylist users.`);
-    buddyID = user.getServerIDBytes();
-
-    usersWithBuddy.forEach(tempuser => {
-        console.log(`Sending update for ${user.username} to ${tempuser.username}`);
-
-        userID = tempuser.getServerIDBytes();
-            response = Buffer.concat([
-                Buffer.from([0, 29, 0]),       // Fixed header
-                userID,                        // User ID (Buffer)
-                Buffer.from([0, 0, 10, 114, 48, 111, 0, 0, 0, 0]),
-                Buffer.concat([
-                    TBL(Buffer.concat([
-                        Buffer.from(user.status, 'ascii'), 
-                        TBL(Buffer.from(user.username, 'ascii')),
-                        buddyID
-                    ]))
-                ]),
-                Buffer.from(PAL_BOT_ID)]);
-            sendOut(tempuser, response); 
-    });
 }
 
 startServer();
+
+module.exports.broadcast_status = broadcast_status;
